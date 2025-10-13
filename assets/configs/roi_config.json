@@ -1,0 +1,16 @@
+{
+  "roi_main": [
+    1519,
+    713,
+    148,
+    102
+  ],
+  "roi_trigger": [
+    292,
+    121,
+    140,
+    25
+  ],
+  "roi_stream_url": "rtsp://nthummrl@gmail.com:nthummrl110@140.114.56.28:554/stream1",
+  "oxy_stream_url": "http://192.168.0.102:8080/video"
+}
