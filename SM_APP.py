@@ -1032,6 +1032,7 @@ def debug_oxy_preprocess_otsu():
 
     cv2.destroyWindow(win_name)
     log("🧪 OXY Debug 工具已關閉")
+
 def manual_trigger_bad():
     global debug_cond_bad
     debug_cond_bad = True
@@ -1040,9 +1041,14 @@ def manual_trigger_bad():
 def manual_trigger_high_oxy():
     global debug_cond_high_oxy
     debug_cond_high_oxy = True
-    log("🧨 手動觸發條件：OXY < 閾值")
+    log("🧨 手動觸發條件：OXY 高於閾值")
     handle_emergency("Manual OXY HIGH")
-
+def reset_safety_conditions():
+    """使用者確認問題排除，清除安全旗標"""
+    global debug_cond_bad, debug_cond_high_oxy
+    debug_cond_bad = False
+    debug_cond_high_oxy = False
+    log("✅ 使用者確認問題已排除，安全狀態已恢復正常")
 # ============== Main App ==============
 def main():
     global root, left_preview, right_preview, roi1_preview, roi2_preview
@@ -1090,8 +1096,18 @@ def main():
     tk.Button(status_frame, text="▶ 開始執行", bg="#3cb371", command=start_all).pack(side="left", padx=5)
     tk.Button(status_frame, text="⏹ 結束執行", bg="#ff6347", command=stop_all).pack(side="left", padx=5)
 
-    debug_status_label = tk.Label(status_frame, text="⚙ Debug 狀態：未觸發", fg="white", bg="#202020", font=("Consolas", 10))
-    debug_status_label.pack(side="right", padx=10)
+    # === 安全狀態區 (Safety State) ===
+    safety_frame = tk.Frame(status_frame, bg="#202020")
+    safety_frame.pack(side="right", padx=10)
+
+    safety_bad_label = tk.Label(safety_frame, text="⚠ BAD狀態: 🟢", fg="lime", bg="#202020", font=("Consolas", 10, "bold"))
+    safety_bad_label.pack(side="left", padx=5)
+
+    safety_oxy_label = tk.Label(safety_frame, text=f"🫁 OXY安全閾值({oxy_threshold}): 🟢", fg="lime", bg="#202020", font=("Consolas", 10, "bold"))
+    safety_oxy_label.pack(side="left", padx=5)
+
+    tk.Button(safety_frame, text="✅ 恢復運行", command=reset_safety_conditions, bg="#444", fg="white").pack(side="left", padx=8)
+
 
     # === Main layout ===
     main_frame = tk.Frame(root, bg="#202020")
@@ -1184,14 +1200,19 @@ def main():
     if not TESS_OK:
         log("⚠ 未安裝 pytesseract（OCR 無法運作）")
 
-        
-    # ============== 背景更新狀態 ==============
-    def update_debug_status():
-        txt = f"BAD={debug_cond_bad}, HIGH_OXY={debug_cond_high_oxy}"
-        color = "lime" if not (debug_cond_bad or debug_cond_high_oxy) else "red"
-        debug_status_label.config(text=f"⚙ Debug 狀態：{txt}", fg=color)
-        root.after(500, update_debug_status)
-    root.after(500, update_debug_status)
+            
+    def update_safety_status():
+        """每 0.5 秒更新安全狀態指標"""
+        bad_color = "lime" if not debug_cond_bad else "red"
+        oxy_color = "lime" if not debug_cond_high_oxy else "red"
+
+        safety_bad_label.config(text=f"⚠ BAD狀態: {'🟢' if not debug_cond_bad else '🔴'}", fg=bad_color)
+        safety_oxy_label.config(text=f"🫁 OXY安全閾值({oxy_threshold}): {'🟢' if not debug_cond_high_oxy else '🔴'}", fg=oxy_color)
+
+        root.after(500, update_safety_status)
+
+    root.after(500, update_safety_status)
+
 
     root.mainloop()
 
