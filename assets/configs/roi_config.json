@@ -6,18 +6,22 @@
     193
   ],
   "roi_trigger": [
-    480,
+    493,
     0,
-    183,
-    94
+    119,
+    82
   ],
   "oxy_roi": [
-    139,
-    281,
-    349,
-    151
+    129,
+    287,
+    340,
+    154
   ],
-  "oxy_otsu_threshold": 45,
+  "oxy_otsu_threshold": 43,
+  "oxy_brightness": 48,
+  "oxy_contrast": 48,
+  "oxy_gamma": 49,
+  "oxy_saturation": 0,
   "roi_stream_url": "rtsp://nthummrl@gmail.com:nthummrl110@140.114.56.28:554/stream1",
   "oxy_stream_url": "http://140.114.56.28:8080/video?dummy=param.mjpg"
 }
