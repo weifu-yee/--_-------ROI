@@ -638,12 +638,12 @@ def screen_roi_preview_loop():
 # ============== Macro (Enhanced Loop + Scroll Support + ESC Safety) ==============
 import ctypes
 import threading
-
 macro_events = []
 macro_loop_delay = 3.0  # 🕒 每輪播放間隔秒數
 _macro_stop_event = threading.Event()
 _macro_thread = None
 _macro_lock = threading.Lock()  # 保護避免多重啟動
+
 
 def _normalize_key_name(k_str: str):
     """將 pynput 記錄的 key 字串轉為 pyautogui 可處理名稱。"""
@@ -665,6 +665,7 @@ def _normalize_key_name(k_str: str):
     if k_str in mapping:
         return mapping[k_str], False
     return None, False
+
 def record_main_macro():
     """開始錄製（按 ESC 結束），輸出至 MACRO_FILE。"""
     if not PYNPUT_OK:
@@ -718,20 +719,6 @@ def record_main_macro():
         log("✅ 錄製完成，已儲存巨集事件")
 
     threading.Thread(target=_record_thread, daemon=True).start()
-
-# def _esc_safety_listener():
-#     """監聽 ESC 鍵，作為保險開關停止巨集。"""
-#     from pynput import keyboard
-#     def on_press(key):
-#         if key == keyboard.Key.esc:
-#             stop_macro_play()
-#             return False
-#     try:
-#         with keyboard.Listener(on_press=on_press) as listener:
-#             listener.join()
-#     except Exception:
-#         pass
-
 def play_main_macro():
     """無限循環播放巨集，按 ESC 停止。"""
     global _macro_thread
@@ -827,6 +814,7 @@ def play_main_macro():
 
         _macro_thread = threading.Thread(target=_run, daemon=True, name="macro_player")
         _macro_thread.start()
+
 def stop_macro_play(force=False):
     """停止巨集播放（支援外部 ESC 停止）。"""
     _macro_stop_event.set()
@@ -850,7 +838,6 @@ def set_macro_delay():
             log(f"⚙️ 已設定播放間隔：{macro_loop_delay:.1f} 秒")
     except Exception as e:
         log(f"⚠️ 設定播放間隔失敗：{e}")
-# ============== End Macro =====================================================
 
 # ============== Start/Stop ==============
 def start_all():
