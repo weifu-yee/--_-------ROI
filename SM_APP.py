@@ -55,6 +55,10 @@ oxy_roi = None
 
 _main_stop_event = threading.Event()  # 🛑 主程序 ESC 停止事件
 
+debug_cond_bad = False
+debug_cond_high_oxy = False
+oxy_threshold = 1.0  # 可自行設定臨界值
+
 # === OXY 前處理參數 ===
 oxy_otsu_threshold = 0  # 0 = 自動 OTSU 模式
 oxy_brightness = 50   # 0~100, 50 = 原圖
@@ -562,6 +566,14 @@ def oxy_monitor_loop():
                 root.after(0, lambda val=text: oxy_value_label.config(
                     text=f"OCR 結果：{val}"
                 ))
+                try:
+                    val_num = float(val)
+                    if val_num > oxy_threshold:
+                        debug_cond_high_oxy = True
+                        log(f"🧨 OXY 值過高：{val_num} > {oxy_threshold}")
+                        handle_emergency("OXY HIGH")
+                except ValueError:
+                    pass
 
         except Exception as e:
             log(f"⚠️ OXY OCR 錯誤: {e}")
@@ -1020,6 +1032,16 @@ def debug_oxy_preprocess_otsu():
 
     cv2.destroyWindow(win_name)
     log("🧪 OXY Debug 工具已關閉")
+def manual_trigger_bad():
+    global debug_cond_bad
+    debug_cond_bad = True
+    log("🧨 手動觸發條件：Predict BAD")
+    handle_emergency("Manual Predict BAD")
+def manual_trigger_high_oxy():
+    global debug_cond_high_oxy
+    debug_cond_high_oxy = True
+    log("🧨 手動觸發條件：OXY < 閾值")
+    handle_emergency("Manual OXY HIGH")
 
 # ============== Main App ==============
 def main():
@@ -1055,6 +1077,9 @@ def main():
     debug_menu = tk.Menu(menubar, tearoff=0)
     debug_menu.add_command(label="手動推送一次 Predict", command=manual_predict_once)
     debug_menu.add_command(label="進階 OXY Preprocess + OTSU Debug", command=debug_oxy_preprocess_otsu)
+    debug_menu.add_separator()
+    debug_menu.add_command(label="🔴 手動觸發 Predict BAD", command=manual_trigger_bad)
+    debug_menu.add_command(label="🟠 手動觸發 OXY 高於閾值", command=manual_trigger_high_oxy)
     menubar.add_cascade(label="Debug 工具", menu=debug_menu)
 
     # === Status bar ===
@@ -1064,6 +1089,9 @@ def main():
     status_label.pack(side="left", padx=10)
     tk.Button(status_frame, text="▶ 開始執行", bg="#3cb371", command=start_all).pack(side="left", padx=5)
     tk.Button(status_frame, text="⏹ 結束執行", bg="#ff6347", command=stop_all).pack(side="left", padx=5)
+
+    debug_status_label = tk.Label(status_frame, text="⚙ Debug 狀態：未觸發", fg="white", bg="#202020", font=("Consolas", 10))
+    debug_status_label.pack(side="right", padx=10)
 
     # === Main layout ===
     main_frame = tk.Frame(root, bg="#202020")
@@ -1155,6 +1183,15 @@ def main():
         log("⚠ Roboflow 未啟用，將以 mock good 模式運行（不會觸發停止）")
     if not TESS_OK:
         log("⚠ 未安裝 pytesseract（OCR 無法運作）")
+
+        
+    # ============== 背景更新狀態 ==============
+    def update_debug_status():
+        txt = f"BAD={debug_cond_bad}, HIGH_OXY={debug_cond_high_oxy}"
+        color = "lime" if not (debug_cond_bad or debug_cond_high_oxy) else "red"
+        debug_status_label.config(text=f"⚙ Debug 狀態：{txt}", fg=color)
+        root.after(500, update_debug_status)
+    root.after(500, update_debug_status)
 
     root.mainloop()
 
