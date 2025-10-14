@@ -353,32 +353,32 @@ def handle_emergency(source="ROI_BAD"):
 
 # ============== Monitor threads ==============
 def roi_monitor_loop():
-    """持續更新左側 ROI 畫面"""
+    """🔶 專職 ROI 觸發監測與推論（不更新畫面）"""
     prev_trig = None
     while monitoring:
         frame = get_roi_frame()
-        global roi_frame_buffer
-        roi_frame_buffer = frame.copy()  # ✅ 更新 ROI buffer 內容
+        if frame is None or frame.size == 0:
+            time.sleep(0.5)
+            continue
 
-        # ROI 觸發監測（若有設定 Trigger ROI）
+        global roi_frame_buffer
+        roi_frame_buffer = frame.copy()  # ✅ 更新最新 buffer 給 preview loop 用
+
+        # === Trigger ROI 檢測 ===
         if roi_trigger is not None:
             x, y, w, h = roi_trigger
             trig = frame[y:y+h, x:x+w].copy()
+
             if prev_trig is not None:
                 triggered, dG, dGray = detect_green_to_gray(
                     prev_trig, trig, g_drop_threshold, gray_increase_threshold
                 )
                 if triggered:
-                    log(f"[ROI] 綠→灰觸發 ΔG={dG:.1f}, ΔGray={dGray:.1f}")
+                    log(f"[ROI Trigger] 綠→灰觸發 ΔG={dG:.1f}, ΔGray={dGray:.1f}")
                     time.sleep(trigger_delay_after_gray)
                     do_inference_on_roi_frame(frame)
-            prev_trig = trig
 
-        # ✅ 顯示 ROI 畫面於左側
-        pil = overlay_roi_and_badge(frame, last_predict_text, last_predict_conf)
-        tkimg = to_tk(pil, size=(480, 270))
-        left_preview.configure(image=tkimg)
-        left_preview.image = tkimg
+            prev_trig = trig
 
         time.sleep(trigger_update_interval)
 def oxy_monitor_loop():
@@ -391,34 +391,33 @@ def oxy_monitor_loop():
             text = pytesseract.image_to_string(th, config="--psm 7 -c tessedit_char_whitelist=0123456789.%").strip()
         pil = overlay_oxy(frame, text, True)
         tkimg = to_tk(pil, size=(480,270))
-        right_preview.configure(image=tkimg); right_preview.image = tkimg
+
+        # ❌ 原本會閃爍或崩潰
+        # right_preview.configure(image=tkimg); right_preview.image = tkimg
+
+        # ✅ 改成這樣
+        root.after(0, lambda img=tkimg: right_preview.configure(image=img))
+        root.after(0, lambda img=tkimg: setattr(right_preview, "image", img))
+        
         time.sleep(0.1)
 
 # ================ Preview Loops ==============
 def roi_preview_loop():
-    """ROI 主畫面預覽（使用 FFMPEG backend + 自動重連）"""
+    """🖼 專職 ROI 畫面顯示更新（FFmpeg + thread-safe GUI 更新）"""
     global roi_frame_buffer
     url = ROI_STREAM_URL
-
-    # 自動將帳號中的 @ 轉成 %40
-    if "@" in url.split("://", 1)[-1].split("@")[0]:
-        parts = url.split("://", 1)
-        prefix = parts[0] + "://"
-        body = parts[1]
-        user_part, rest = body.split("@", 1)
-        if "@" in user_part:
-            user_part = user_part.replace("@", "%40")
-        url = prefix + user_part + "@" + rest
-
     cap = None
     reconnecting = False
 
+    log("📡 ROI 預覽執行中（FFMPEG backend）")
+
     while True:
         try:
+            # === 重新連線處理 ===
             if cap is None or not cap.isOpened():
                 if not reconnecting:
-                    log("🔴 ROI 串流中斷，重新連線中...")
                     reconnecting = True
+                    log("🔴 ROI 串流中斷，重新連線中...")
                     gray = gray_frame(640, 480)
                     pil = Image.fromarray(gray)
                     draw = ImageDraw.Draw(pil)
@@ -431,6 +430,7 @@ def roi_preview_loop():
                 time.sleep(2)
                 continue
 
+            # === 正常取 frame ===
             ok, frame = cap.read()
             if not ok or frame is None:
                 cap.release()
@@ -441,32 +441,24 @@ def roi_preview_loop():
             reconnecting = False
             roi_frame_buffer = frame.copy()
 
-            # 主畫面更新
+            # === 主畫面更新 ===
             pil = overlay_roi_and_badge(frame, last_predict_text, last_predict_conf)
             tkimg = to_tk(pil, size=(480, 270))
             root.after(0, lambda img=tkimg: left_preview.configure(image=img))
             root.after(0, lambda img=tkimg: setattr(left_preview, "image", img))
 
-            # 小區域 ROI1 / ROI2 預覽
-            try:
-                # if roi_main:
-                #     x, y, w, h = roi_main
-                #     roi_crop = frame[y:y+h, x:x+w]
-                #     tkroi = to_tk(Image.fromarray(cv2.cvtColor(roi_crop, cv2.COLOR_BGR2RGB)), size=(360, 200))
-                #     root.after(0, lambda img=tkroi: roi1_preview.configure(image=img))
-                #     root.after(0, lambda img=tkroi: setattr(roi1_preview, "image", img))
+            # === ROI Trigger 小預覽（非觸發檢測，只顯示） ===
+            if roi_trigger:
+                x, y, w, h = roi_trigger
+                roi2_crop = frame[y:y+h, x:x+w]
+                tkroi2 = to_tk(Image.fromarray(cv2.cvtColor(roi2_crop, cv2.COLOR_BGR2RGB)), size=(120, 120))
+                root.after(0, lambda img=tkroi2: roi2_preview.configure(image=img))
+                root.after(0, lambda img=tkroi2: setattr(roi2_preview, "image", img))
 
-                if roi_trigger:
-                    x, y, w, h = roi_trigger
-                    roi2_crop = frame[y:y+h, x:x+w]
-                    tkroi2 = to_tk(Image.fromarray(cv2.cvtColor(roi2_crop, cv2.COLOR_BGR2RGB)), size=(120, 120))
-                    root.after(0, lambda img=tkroi2: roi2_preview.configure(image=img))
-                    root.after(0, lambda img=tkroi2: setattr(roi2_preview, "image", img))
-            except Exception:
-                pass
+            time.sleep(0.05)
 
         except Exception as e:
-            log(f"⚠️ ROI 串流錯誤：{e}")
+            log(f"⚠️ ROI 預覽錯誤：{e}")
             cap = None
             time.sleep(1)
 def oxy_preview_loop():
@@ -580,65 +572,35 @@ def oxy_preview_loop():
             cap = None
             time.sleep(1)
 
-# ============== Macro (Enhanced Loop + Scroll Support) ==============
+# ============== Macro (Enhanced Loop + Scroll Support + ESC Safety) ==============
 import ctypes
 import threading
 
-# 共享狀態
 macro_events = []
-macro_loop_delay = 3.0  # 🕒 每輪播放間隔秒數（可由使用者設定）
+macro_loop_delay = 3.0  # 🕒 每輪播放間隔秒數
 _macro_stop_event = threading.Event()
 _macro_thread = None
+_macro_lock = threading.Lock()  # 保護避免多重啟動
 
 def _normalize_key_name(k_str: str):
-    """
-    將 pynput 記錄的 key 字串（如 'a', 'Key.enter'）轉為 pyautogui 可處理的名稱。
-    回傳 (key_name, is_text)；is_text=True 時用 typewrite，否則用 press。
-    """
-    k_str = k_str.replace("'", "").strip()  # e.g. "'a'" -> a
-
-    # 單一可見字元（字母、數字、符號）
+    """將 pynput 記錄的 key 字串轉為 pyautogui 可處理名稱。"""
+    k_str = k_str.replace("'", "").strip()
     if len(k_str) == 1:
-        return k_str, True  # 用 typewrite
-
-    # 常見特殊鍵映射
+        return k_str, True
     mapping = {
-        "Key.enter": "enter",
-        "Key.tab": "tab",
-        "Key.backspace": "backspace",
-        "Key.delete": "delete",
-        "Key.space": "space",
-        "Key.esc": "esc",
-        "Key.escape": "esc",
-        "Key.up": "up",
-        "Key.down": "down",
-        "Key.left": "left",
-        "Key.right": "right",
-        "Key.home": "home",
-        "Key.end": "end",
-        "Key.page_up": "pageup",
-        "Key.page_down": "pagedown",
-        "Key.shift": "shift",
-        "Key.shift_r": "shift",
-        "Key.ctrl": "ctrl",
-        "Key.ctrl_r": "ctrl",
-        "Key.alt": "alt",
-        "Key.alt_r": "alt",
-        "Key.cmd": "win",
-        "Key.cmd_r": "win",
-        "Key.caps_lock": "capslock",
-        "Key.print_screen": "printscreen",
-        "Key.num_lock": "numlock",
+        "Key.enter": "enter", "Key.tab": "tab", "Key.backspace": "backspace",
+        "Key.delete": "delete", "Key.space": "space", "Key.esc": "esc", "Key.escape": "esc",
+        "Key.up": "up", "Key.down": "down", "Key.left": "left", "Key.right": "right",
+        "Key.home": "home", "Key.end": "end", "Key.page_up": "pageup", "Key.page_down": "pagedown",
+        "Key.shift": "shift", "Key.ctrl": "ctrl", "Key.alt": "alt", "Key.cmd": "win",
+        "Key.caps_lock": "capslock", "Key.print_screen": "printscreen", "Key.num_lock": "numlock",
         "Key.scroll_lock": "scrolllock",
-        # 功能鍵
-        "Key.f1": "f1", "Key.f2": "f2", "Key.f3": "f3", "Key.f4": "f4",
-        "Key.f5": "f5", "Key.f6": "f6", "Key.f7": "f7", "Key.f8": "f8",
-        "Key.f9": "f9", "Key.f10": "f10", "Key.f11": "f11", "Key.f12": "f12",
+        "Key.f1": "f1", "Key.f2": "f2", "Key.f3": "f3", "Key.f4": "f4", "Key.f5": "f5",
+        "Key.f6": "f6", "Key.f7": "f7", "Key.f8": "f8", "Key.f9": "f9", "Key.f10": "f10",
+        "Key.f11": "f11", "Key.f12": "f12",
     }
     if k_str in mapping:
         return mapping[k_str], False
-
-    # 其他不支援的複合鍵或未列入者，忽略
     return None, False
 def record_main_macro():
     """開始錄製（按 ESC 結束），輸出至 MACRO_FILE。"""
@@ -660,12 +622,10 @@ def record_main_macro():
                 "type": "click",
                 "x": int(x), "y": int(y),
                 "btn": str(btn),
-                "pressed": bool(pressed)  # True = press, False = release
+                "pressed": bool(pressed)
             })
 
         def on_scroll(x, y, dx, dy):
-            # Windows: 往上 dy>0；pyautogui.scroll(): 正值 = 向上
-            # 我們錄製保留系統方向，重播時無需反轉
             macro_events.append({
                 "t": time.time() - start,
                 "type": "scroll",
@@ -675,7 +635,7 @@ def record_main_macro():
 
         def on_key(k):
             if k == keyboard.Key.esc:
-                return False  # 停止錄製
+                return False
             macro_events.append({
                 "t": time.time() - start,
                 "type": "key",
@@ -686,7 +646,7 @@ def record_main_macro():
         kl = keyboard.Listener(on_press=on_key)
         ml.start()
         kl.start()
-        kl.join()   # 等待鍵盤監聽結束（按 ESC）
+        kl.join()
         ml.stop()
 
         json.dump(macro_events, open(MACRO_FILE, "w", encoding="utf-8"),
@@ -695,107 +655,129 @@ def record_main_macro():
         log("✅ 錄製完成，已儲存巨集事件")
 
     threading.Thread(target=_record_thread, daemon=True).start()
+
+def _esc_safety_listener():
+    """監聽 ESC 鍵，作為保險開關停止巨集。"""
+    from pynput import keyboard
+    def on_press(key):
+        if key == keyboard.Key.esc:
+            stop_macro_play()
+            return False
+    try:
+        with keyboard.Listener(on_press=on_press) as listener:
+            listener.join()
+    except Exception:
+        pass
+
 def play_main_macro():
-    """無限循環播放巨集，直到 stop_macro_play()。"""
+    """無限循環播放巨集，按 ESC 停止。"""
     global _macro_thread
 
-    if not os.path.exists(MACRO_FILE):
-        messagebox.showwarning("提示", "沒有可播放的巨集。")
-        return
+    with _macro_lock:
+        if _macro_thread and _macro_thread.is_alive():
+            log("ℹ️ 巨集已在播放中，忽略本次啟動請求")
+            return
 
-    # 匯入 pyautogui（可能未安裝）
-    try:
-        import pyautogui
-    except Exception as e:
-        log(f"❌ 缺少 pyautogui，無法播放巨集：{e}")
-        return
+        if not os.path.exists(MACRO_FILE):
+            messagebox.showwarning("提示", "沒有可播放的巨集。")
+            return
 
-    # 載入事件一次（避免反覆 I/O）
-    try:
-        with open(MACRO_FILE, "r", encoding="utf-8") as f:
-            events = json.load(f)
-    except Exception as e:
-        log(f"❌ 讀取巨集檔失敗：{e}")
-        return
-
-    # 安全清除停止事件
-    _macro_stop_event.clear()
-
-    def _run():
         try:
-            log(f"▶ 無限播放巨集，間隔 {macro_loop_delay:.1f} 秒")
+            import pyautogui
+        except Exception as e:
+            log(f"❌ 缺少 pyautogui，無法播放巨集：{e}")
+            return
 
-            while not _macro_stop_event.is_set():
-                t0 = time.time()
-                for e in events:
-                    if _macro_stop_event.is_set():
-                        break
+        try:
+            with open(MACRO_FILE, "r", encoding="utf-8") as f:
+                events = json.load(f)
+        except Exception as e:
+            log(f"❌ 讀取巨集檔失敗：{e}")
+            return
 
-                    # 時間對齊
-                    delay = e.get("t", 0) - (time.time() - t0)
-                    if delay > 0:
-                        # 等待期間也可被中止
-                        waited = 0.0
-                        while waited < delay and not _macro_stop_event.is_set():
-                            time.sleep(min(0.01, delay - waited))
-                            waited += 0.01
+        _macro_stop_event.clear()
+        set_status(True)
+        try:
+            status_label.config(text="🔵 巨集執行中（按 ESC 停止）", fg="cyan")
+        except Exception:
+            pass
+
+        def _run():
+            try:
+                log(f"▶ 無限播放巨集，間隔 {macro_loop_delay:.1f} 秒")
+                # 啟動安全監聽 ESC
+                threading.Thread(target=_esc_safety_listener, daemon=True).start()
+
+                while not _macro_stop_event.is_set():
+                    t0 = time.time()
+                    for e in events:
                         if _macro_stop_event.is_set():
                             break
 
-                    etype = e.get("type")
-                    try:
-                        if etype == "click":
-                            x, y = int(e.get("x", 0)), int(e.get("y", 0))
-                            pressed = bool(e.get("pressed", True))
-                            # 將 press/release 分離，支援拖曳
-                            if pressed:
-                                pyautogui.mouseDown(x, y)
-                            else:
-                                pyautogui.mouseUp(x, y)
+                        delay = e.get("t", 0) - (time.time() - t0)
+                        if delay > 0:
+                            waited = 0.0
+                            while waited < delay and not _macro_stop_event.is_set():
+                                time.sleep(min(0.01, delay - waited))
+                                waited += 0.01
+                            if _macro_stop_event.is_set():
+                                break
 
-                        elif etype == "scroll":
-                            dy = int(e.get("dy", 0))
-                            pyautogui.scroll(int(dy * SCROLL_SCALE))
+                        etype = e.get("type")
+                        try:
+                            if etype == "click":
+                                x, y = int(e.get("x", 0)), int(e.get("y", 0))
+                                pressed = bool(e.get("pressed", True))
+                                if pressed:
+                                    pyautogui.mouseDown(x, y)
+                                else:
+                                    pyautogui.mouseUp(x, y)
 
-                        elif etype == "key":
-                            key_raw = e.get("key", "")
-                            key_name, is_text = _normalize_key_name(key_raw)
-                            if not key_name:
-                                # 不支援的鍵，略過
-                                continue
-                            if is_text:
-                                pyautogui.typewrite(key_name)
-                            else:
-                                pyautogui.press(key_name)
+                            elif etype == "scroll":
+                                dy = int(e.get("dy", 0))
+                                pyautogui.scroll(int(dy * SCROLL_SCALE))
 
-                    except Exception as ie:
-                        log(f"⚠️ 巨集事件執行失敗：{ie}")
+                            elif etype == "key":
+                                key_raw = e.get("key", "")
+                                key_name, is_text = _normalize_key_name(key_raw)
+                                if not key_name:
+                                    continue
+                                if is_text:
+                                    pyautogui.typewrite(key_name)
+                                else:
+                                    pyautogui.press(key_name)
 
-                if _macro_stop_event.is_set():
-                    break
+                        except Exception as ie:
+                            log(f"⚠️ 巨集事件執行失敗：{ie}")
 
-                log(f"⏸ 等待 {macro_loop_delay:.1f}s 後重播")
-                waited = 0.0
-                while waited < macro_loop_delay and not _macro_stop_event.is_set():
-                    time.sleep(min(0.05, macro_loop_delay - waited))
-                    waited += 0.05
+                    if _macro_stop_event.is_set():
+                        break
 
-        finally:
-            log("🟥 巨集播放結束")
+                    log(f"⏸ 等待 {macro_loop_delay:.1f}s 後重播")
+                    waited = 0.0
+                    while waited < macro_loop_delay and not _macro_stop_event.is_set():
+                        time.sleep(min(0.05, macro_loop_delay - waited))
+                        waited += 0.05
 
-    # 避免重複啟動多條播放緒
-    if _macro_thread and _macro_thread.is_alive():
-        log("ℹ️ 巨集已在播放中，忽略本次啟動請求")
-        return
+            finally:
+                stop_macro_play(force=True)
 
-    _macro_thread = threading.Thread(target=_run, daemon=True, name="macro_player")
-    _macro_thread.start()
-def stop_macro_play():
-    """停止巨集播放（不中斷其他監測）。"""
+        _macro_thread = threading.Thread(target=_run, daemon=True, name="macro_player")
+        _macro_thread.start()
+def stop_macro_play(force=False):
+    """停止巨集播放（支援外部 ESC 停止）。"""
     _macro_stop_event.set()
-    log("🟥 停止巨集")
+    try:
+        if force:
+            log("🟥 巨集播放結束")
+        else:
+            log("🟥 使用者停止巨集")
+        set_status(False)
+        status_label.config(text="🔴 Idle", fg="red")
+    except Exception:
+        pass
 def set_macro_delay():
-    """彈出對話框讓使用者設定播放間隔秒數"""
+    """設定播放間隔。"""
     global macro_loop_delay
     try:
         val = tk.simpledialog.askfloat("設定播放間隔", "請輸入每次巨集播放間隔（秒）",
@@ -810,12 +792,16 @@ def set_macro_delay():
 # ============== Start/Stop ==============
 def start_all():
     global monitoring
-    if monitoring: return
-    monitoring = True; set_status(True)
+    if monitoring:
+        return
+    monitoring = True
+    set_status(True)
+    # --- 分開職責 ---
+    threading.Thread(target=roi_preview_loop, daemon=True).start()
     threading.Thread(target=roi_monitor_loop, daemon=True).start()
     threading.Thread(target=oxy_monitor_loop, daemon=True).start()
     play_main_macro()
-    log("✅ 開始執行")
+    log("✅ 開始執行（Preview + Monitor + OXY + Macro）")
 def stop_all_monitoring(silent=False):
     global monitoring
     monitoring = False; set_status(False)
