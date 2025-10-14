@@ -18,7 +18,7 @@ try:
 except Exception:
     PYNPUT_OK = False
 
-TESS_OK = True
+TESS_OK = False
 try:
     import pytesseract
 except Exception:
@@ -71,21 +71,18 @@ if ROBOWFLOW_ENABLED:
 
 # ============== Utils ==============
 def ts(): return time.strftime("%H:%M:%S")
-
 def log(msg):
     print(msg)
     try:
         console.insert(tk.END, f"{ts()} | {msg}\n"); console.see(tk.END)
     except Exception:
         pass
-
 def set_status(active:bool):
     global recording
     recording = active
     if status_label.winfo_exists():
         status_label.config(text=("🟢 Active" if active else "🔴 Idle"),
                             fg=("lime" if active else "red"))
-
 def save_roi_config():
     data = {"roi_main": list(roi_main) if roi_main else None,
             "roi_trigger": list(roi_trigger) if roi_trigger else None,
@@ -93,7 +90,6 @@ def save_roi_config():
             "oxy_stream_url": OXY_STREAM_URL}
     json.dump(data, open(ROI_FILE, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
     log("✅ ROI/Stream 設定已儲存")
-
 def load_roi_config():
     global roi_main, roi_trigger, ROI_STREAM_URL, OXY_STREAM_URL, ROI_USERNAME, ROI_PASSWORD
     if os.path.exists(ROI_FILE):
@@ -109,12 +105,10 @@ def load_roi_config():
         ROI_USERNAME = ROI_PASSWORD = ""
         log("（尚未有 ROI/Stream 設定）")
 
-
 # ============== Image utils ==============
 def to_tk(pil_img, size=None):
     if size: pil_img = pil_img.resize(size, Image.LANCZOS)
     return ImageTk.PhotoImage(pil_img)
-
 def gray_frame(w=640, h=480):
     """🩶 Return a plain gray fallback frame."""
     return np.full((h, w, 3), 80, dtype=np.uint8)
@@ -123,6 +117,12 @@ def gray_frame(w=640, h=480):
 roi_frame_buffer = gray_frame(640, 480)
 
 # ============== Stream wrappers ==============
+def init_gray_preview():
+    g1 = to_tk(Image.fromarray(gray_frame(480, 270)))
+    g2 = to_tk(Image.fromarray(gray_frame(480, 100)))
+    left_preview.configure(image=g1); left_preview.image = g1
+    right_preview.configure(image=g2); right_preview.image = g2
+    log("🩶 初始灰底畫面已載入")
 def read_stream(url):
     """
     永遠回傳一張畫面 (串流失敗時為灰底)
@@ -156,14 +156,11 @@ def read_stream(url):
     except Exception as e:
         log(f"❌ RTSP 讀取錯誤: {e}")
         return gray_frame()
-
-
 def get_roi_frame():
     try:
         return read_stream(ROI_STREAM_URL, ROI_USERNAME, ROI_PASSWORD)
     except:
         return gray_frame()
-
 def get_oxy_frame():
     try:
         return read_stream(OXY_STREAM_URL)
@@ -187,8 +184,6 @@ def overlay_roi_and_badge(frame_bgr, pred_text=None, pred_conf=None):
         draw.rectangle([x, y, x+w, y+h], outline=(255,215,0), width=3)
         draw.text((x, max(0,y-20)), "ROI2(Trigger)", fill=(255,215,0), font=font)
     return pil
-
-
 def overlay_oxy(frame_bgr, oxy_text:str, ok:bool, show_warn_if_empty=True):
     img = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     pil = Image.fromarray(img)
@@ -212,7 +207,6 @@ def detect_green_to_gray(prev_img, curr_img, g_drop=5, gray_increase=10):
     delta_gray = curr_gray - prev_gray
     trigger = (delta_g > g_drop) and (delta_gray > gray_increase)
     return trigger, float(delta_g), float(delta_gray)
-
 def do_inference_on_roi_frame(frame_bgr):
     """
     在 ROI 區域進行推論，並於 App 介面下方更新辨識結果 Label。
@@ -274,7 +268,6 @@ def do_inference_on_roi_frame(frame_bgr):
 
     return None, None
 
-
 # ============== Emergency handling ==============
 alert_win = None
 def show_alert(msg="⚠️ 異常偵測"):
@@ -295,14 +288,12 @@ def show_alert(msg="⚠️ 異常偵測"):
     else:
         tk.Label(alert_win, text=msg, fg="red", bg="black", font=("Arial", 80, "bold")).pack(expand=True)
     alert_win.bind("<Button-1>", lambda e: close_alert())
-
 def close_alert():
     global alert_win, pause_for_alert
     if alert_win is not None:
         alert_win.destroy()
         alert_win = None
     pause_for_alert = False
-
 def handle_emergency(source="ROI_BAD"):
     log(f"🛑 Emergency from {source}")
     stop_macro_play()
@@ -310,12 +301,55 @@ def handle_emergency(source="ROI_BAD"):
     show_alert(f"⚠️ 異常：{source}")
 
 # ============== Monitor threads ==============
+def roi_monitor_loop():
+    """持續更新左側 ROI 畫面"""
+    prev_trig = None
+    while monitoring:
+        frame = get_roi_frame()
+        global roi_frame_buffer
+        roi_frame_buffer = frame.copy()  # ✅ 更新 ROI buffer 內容
+
+        # ROI 觸發監測（若有設定 Trigger ROI）
+        if roi_trigger is not None:
+            x, y, w, h = roi_trigger
+            trig = frame[y:y+h, x:x+w].copy()
+            if prev_trig is not None:
+                triggered, dG, dGray = detect_green_to_gray(
+                    prev_trig, trig, g_drop_threshold, gray_increase_threshold
+                )
+                if triggered:
+                    log(f"[ROI] 綠→灰觸發 ΔG={dG:.1f}, ΔGray={dGray:.1f}")
+                    time.sleep(trigger_delay_after_gray)
+                    do_inference_on_roi_frame(frame)
+            prev_trig = trig
+
+        # ✅ 顯示 ROI 畫面於左側
+        pil = overlay_roi_and_badge(frame, last_predict_text, last_predict_conf)
+        tkimg = to_tk(pil, size=(480, 270))
+        left_preview.configure(image=tkimg)
+        left_preview.image = tkimg
+
+        time.sleep(trigger_update_interval)
+def oxy_monitor_loop():
+    while monitoring:
+        frame = get_oxy_frame()
+        text = ""
+        if TESS_OK:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
+            text = pytesseract.image_to_string(th, config="--psm 7 -c tessedit_char_whitelist=0123456789.%").strip()
+        pil = overlay_oxy(frame, text, True)
+        tkimg = to_tk(pil, size=(480,270))
+        right_preview.configure(image=tkimg); right_preview.image = tkimg
+        time.sleep(0.1)
+
+# ================ Preview Loops ==============
 def roi_preview_loop():
-    """穩定的 ROI 主畫面顯示（支援自動重連 + 灰底 fallback）"""
+    """ROI 主畫面預覽（使用 FFMPEG backend + 自動重連）"""
     global roi_frame_buffer
     url = ROI_STREAM_URL
 
-    # 自動轉換帳號 @ → %40
+    # 自動將帳號中的 @ 轉成 %40
     if "@" in url.split("://", 1)[-1].split("@")[0]:
         parts = url.split("://", 1)
         prefix = parts[0] + "://"
@@ -324,7 +358,6 @@ def roi_preview_loop():
         if "@" in user_part:
             user_part = user_part.replace("@", "%40")
         url = prefix + user_part + "@" + rest
-        log(f"🔧 已自動修正 RTSP URL: {url}")
 
     cap = None
     reconnecting = False
@@ -333,13 +366,12 @@ def roi_preview_loop():
         try:
             if cap is None or not cap.isOpened():
                 if not reconnecting:
-                    log("🔴 RTSP 連線中斷，準備重新連線...")
+                    log("🔴 ROI 串流中斷，重新連線中...")
                     reconnecting = True
-                    # 顯示灰底 + Reconnecting
                     gray = gray_frame(640, 480)
                     pil = Image.fromarray(gray)
                     draw = ImageDraw.Draw(pil)
-                    draw.text((200, 230), "RTSP Reconnecting...", fill=(255, 0, 0))
+                    draw.text((200, 230), "ROI Reconnecting...", fill=(255, 0, 0))
                     tkimg = to_tk(pil, size=(480, 270))
                     root.after(0, lambda img=tkimg: left_preview.configure(image=img))
                     root.after(0, lambda img=tkimg: setattr(left_preview, "image", img))
@@ -358,13 +390,13 @@ def roi_preview_loop():
             reconnecting = False
             roi_frame_buffer = frame.copy()
 
-            # 更新 ROI 主畫面
+            # 主畫面更新
             pil = overlay_roi_and_badge(frame, last_predict_text, last_predict_conf)
             tkimg = to_tk(pil, size=(480, 270))
             root.after(0, lambda img=tkimg: left_preview.configure(image=img))
             root.after(0, lambda img=tkimg: setattr(left_preview, "image", img))
 
-            # 更新下方兩個小區域預覽
+            # 小區域 ROI1 / ROI2 預覽
             try:
                 if roi_main:
                     x, y, w, h = roi_main
@@ -386,82 +418,22 @@ def roi_preview_loop():
             log(f"⚠️ ROI 串流錯誤：{e}")
             cap = None
             time.sleep(1)
-
-def oxy_monitor_loop():
-    while monitoring:
-        frame = get_oxy_frame()
-        text = ""
-        if TESS_OK:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
-            text = pytesseract.image_to_string(th, config="--psm 7 -c tessedit_char_whitelist=0123456789.%").strip()
-        pil = overlay_oxy(frame, text, True)
-        tkimg = to_tk(pil, size=(480,270))
-        right_preview.configure(image=tkimg); right_preview.image = tkimg
-        time.sleep(0.1)
-
-# ============== Background Preview (always running) ==============
-def roi_preview_loop():
-    """穩定的 ROI 預覽更新迴圈（可顯示 RTSP 畫面）"""
-    global roi_frame_buffer
-    cap = None
-    url = ROI_STREAM_URL
-
-    # 自動將帳號中的 @ 轉成 %40
-    if "@" in url.split("://", 1)[-1].split("@")[0]:
-        parts = url.split("://", 1)
-        prefix = parts[0] + "://"
-        body = parts[1]
-        user_part, rest = body.split("@", 1)
-        if "@" in user_part:
-            user_part = user_part.replace("@", "%40")
-        url = prefix + user_part + "@" + rest
-        log(f"🔧 已自動修正 RTSP URL: {url}")
-
-    cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-    if not cap.isOpened():
-        log(f"❌ 無法開啟 RTSP 串流：{url}")
-        return
-
-    log("📡 ROI 串流已開啟，開始更新畫面")
-    while True:
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            log("⚠️ ROI 串流中斷，重新嘗試連線中...")
-            time.sleep(1)
-            cap.release()
-            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-            continue
-
-        roi_frame_buffer = frame.copy()
-
-        # 轉換成 Tkinter 可顯示格式
-        try:
-            pil = overlay_roi_and_badge(frame, last_predict_text, last_predict_conf)
-            tkimg = to_tk(pil, size=(480, 270))
-            # 更新到 GUI （在主執行緒排程執行以防 tkinter 崩潰）
-            root.after(0, lambda img=tkimg: left_preview.configure(image=img))
-            root.after(0, lambda img=tkimg: setattr(left_preview, "image", img))
-        except Exception as e:
-            log(f"⚠️ ROI 畫面更新失敗：{e}")
-
-        time.sleep(0.05)  # 每秒約 20fps 更新
-
 def oxy_preview_loop():
-    """持續更新右側 Oxygen Stream 畫面（支援 MJPEG + 自動重連）"""
+    """OXY 畫面預覽（MJPEG HTTP 串流，使用 FFMPEG backend）"""
     global OXY_STREAM_URL
     url = OXY_STREAM_URL
     cap = None
     reconnecting = False
 
-    log(f"🔍 嘗試開啟 OXY 串流：{url}")
+    log(f"🔍 嘗試開啟 OXY 串流（FFMPEG backend）: {url}")
 
     while True:
         try:
+            # 若尚未開啟或中斷 → 重新連線
             if cap is None or not cap.isOpened():
                 if not reconnecting:
-                    log("🟡 OXY 串流中斷，嘗試重新連線...")
                     reconnecting = True
+                    log("🟡 OXY 串流中斷，重新連線中...")
                     gray = gray_frame(480, 100)
                     pil = Image.fromarray(gray)
                     draw = ImageDraw.Draw(pil)
@@ -470,22 +442,17 @@ def oxy_preview_loop():
                     root.after(0, lambda img=tkimg: right_preview.configure(image=img))
                     root.after(0, lambda img=tkimg: setattr(right_preview, "image", img))
 
-                # ✅ 嘗試多種 backend 開啟
-                # cap = cv2.VideoCapture(url)
+                # ✅ 使用 FFMPEG backend，但調整 buffer 與 timeout
                 cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-                cap.set(cv2.CAP_PROP_FPS, 30)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
-
-                if not cap.isOpened():
-                    log("⚠️ MJPEG backend 無法開啟，改用 FFMPEG 嘗試")
-                    cap = cv2.VideoCapture(f"{url}?dummy=param.mjpg", cv2.CAP_FFMPEG)
-                    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
-                time.sleep(2)
+                cap.set(cv2.CAP_PROP_FPS, 30)
+                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000)
+                time.sleep(1)
                 continue
 
             ok, frame = cap.read()
             if not ok or frame is None:
+                log("⚠️ OXY 無法讀取 frame，嘗試重連...")
                 cap.release()
                 cap = None
                 time.sleep(1)
@@ -512,13 +479,13 @@ def oxy_preview_loop():
 
         except Exception as e:
             log(f"❌ OXY 串流錯誤: {e}")
+            if cap:
+                cap.release()
             cap = None
             time.sleep(1)
 
 # ============== Macro (Enhanced Loop + Scroll Support) ==============
-
 import ctypes
-
 macro_events = []
 macro_play_stop = False
 macro_loop_delay = 3.0  # 🕒 每輪播放間隔秒數（可由使用者設定）
@@ -529,7 +496,6 @@ def get_scroll_lines():
     lines = ctypes.c_int()
     ctypes.windll.user32.SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, ctypes.byref(lines), 0)
     return lines.value if lines.value > 0 else 3
-
 def record_main_macro():
     if not PYNPUT_OK:
         messagebox.showwarning("提示", "未安裝 pynput。")
@@ -582,8 +548,6 @@ def record_main_macro():
         log("✅ 錄製完成")
 
     threading.Thread(target=_record_thread, daemon=True).start()
-
-
 def play_main_macro():
     if not os.path.exists(MACRO_FILE):
         messagebox.showwarning("提示", "沒有可播放的巨集。")
@@ -624,14 +588,10 @@ def play_main_macro():
         log("🟥 巨集播放結束")
 
     threading.Thread(target=_run, daemon=True).start()
-
-
 def stop_macro_play():
     global macro_play_stop
     macro_play_stop = True
     log("🟥 停止巨集")
-
-
 def set_macro_delay():
     """彈出對話框讓使用者設定播放間隔秒數"""
     global macro_loop_delay
@@ -649,15 +609,12 @@ def start_all():
     threading.Thread(target=oxy_monitor_loop, daemon=True).start()
     play_main_macro()
     log("✅ 開始執行")
-
 def stop_all_monitoring(silent=False):
     global monitoring
     monitoring = False; set_status(False)
     if not silent: log("🟥 停止監測")
-
 def stop_all():
     stop_macro_play(); stop_all_monitoring(); close_alert()
-
 def select_roi(which="main"):
     """開啟目前 ROI buffer 讓使用者框選 ROI"""
     global roi_frame_buffer, roi_main, roi_trigger
@@ -700,173 +657,264 @@ def select_roi(which="main"):
     except Exception as e:
         log(f"⚠️ 無法更新預覽畫面：{e}")
 
+def main():
+    global root, left_preview, right_preview, roi1_preview, roi2_preview
+    global oxy_value_label, roi_result_label, console, status_label
+
+    root = tk.Tk()
+    root.title("Smart ROI Monitor v13 (RTSP + OXY MJPEG)")
+    root.geometry("1200x850")
+    root.configure(bg="#202020")
+
+    # === Menu ===
+    menubar = tk.Menu(root)
+    macro_menu = tk.Menu(menubar, tearoff=0)
+    macro_menu.add_command(label="錄製巨集", command=record_main_macro)
+    macro_menu.add_command(label="播放巨集", command=play_main_macro)
+    macro_menu.add_command(label="停止巨集", command=stop_macro_play)
+    macro_menu.add_separator()
+    macro_menu.add_command(label="設定播放間隔", command=set_macro_delay)
+    menubar.add_cascade(label="巨集", menu=macro_menu)
+
+    roi_menu = tk.Menu(menubar, tearoff=0)
+    roi_menu.add_command(label="選取 ROI Main", command=lambda: select_roi("main"))
+    roi_menu.add_command(label="選取 ROI Trigger", command=lambda: select_roi("trigger"))
+    roi_menu.add_separator()
+    roi_menu.add_command(label="重新載入 ROI 設定", command=load_roi_config)
+    roi_menu.add_command(label="儲存 ROI 設定", command=save_roi_config)
+    menubar.add_cascade(label="ROI 設定", menu=roi_menu)
+    root.config(menu=menubar)
+
+    # === Status bar ===
+    status_frame = tk.Frame(root, bg="#202020")
+    status_frame.grid(row=0, column=0, sticky="ew", pady=5)
+    status_label = tk.Label(status_frame, text="🔴 Idle", fg="red", bg="#202020", font=("Arial", 14, "bold"))
+    status_label.pack(side="left", padx=10)
+    tk.Button(status_frame, text="▶ 開始執行", bg="#3cb371", command=start_all).pack(side="left", padx=5)
+    tk.Button(status_frame, text="⏹ 結束執行", bg="#ff6347", command=stop_all).pack(side="left", padx=5)
+
+    # === Main layout ===
+    main_frame = tk.Frame(root, bg="#202020")
+    main_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
+    root.rowconfigure(1, weight=1)
+    root.columnconfigure(0, weight=1)
+    main_frame.columnconfigure(0, weight=1)
+    main_frame.columnconfigure(1, weight=1)
+    main_frame.rowconfigure(0, weight=1)
+
+    # ----- Left (ROI) -----
+    left_frame = tk.Frame(main_frame, bg="#202020")
+    left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    left_frame.columnconfigure(0, weight=1)
+    left_frame.rowconfigure(2, weight=1)
+
+    roi_box = tk.LabelFrame(left_frame, text="ROI Stream", fg="white", bg="#202020")
+    roi_box.grid(row=0, column=0, sticky="nsew", pady=5)
+    left_preview = tk.Label(roi_box, bg="black")
+    left_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+
+    roi_result_label = tk.Label(left_frame, text="辨識結果：—", fg="cyan", bg="#202020", font=("Consolas", 12))
+    roi_result_label.grid(row=1, column=0, pady=5)
+
+    roi_subframe = tk.Frame(left_frame, bg="#202020")
+    roi_subframe.grid(row=2, column=0, sticky="nsew", pady=5)
+    roi_subframe.columnconfigure(0, weight=1)
+    roi_subframe.columnconfigure(1, weight=1)
+
+    roi2_box = tk.LabelFrame(roi_subframe, text="ROI2 Trigger", fg="white", bg="#202020")
+    roi2_box.grid(row=0, column=0, sticky="nsew", padx=4)
+    roi2_preview = tk.Label(roi2_box, bg="black")
+    roi2_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+
+    roi1_box = tk.LabelFrame(roi_subframe, text="ROI1 Predict", fg="white", bg="#202020")
+    roi1_box.grid(row=0, column=1, sticky="nsew", padx=4)
+    roi1_preview = tk.Label(roi1_box, bg="black")
+    roi1_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+
+    # ----- Right (OXY + Console) -----
+    right_frame = tk.Frame(main_frame, bg="#202020")
+    right_frame.grid(row=0, column=1, sticky="nsew")
+    right_frame.columnconfigure(0, weight=1)
+    right_frame.rowconfigure(2, weight=1)
+
+    oxy_box = tk.LabelFrame(right_frame, text="Oxygen Stream", fg="white", bg="#202020")
+    oxy_box.grid(row=0, column=0, sticky="ew", pady=5)
+    right_preview = tk.Label(oxy_box, bg="black")
+    right_preview.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+
+    oxy_value_label = tk.Label(right_frame, text="OCR 結果：—", fg="lime", bg="#202020", font=("Consolas", 12))
+    oxy_value_label.grid(row=1, column=0, pady=5, sticky="ew")
+
+    console_box = tk.LabelFrame(right_frame, text="Console Log", fg="white", bg="#202020")
+    console_box.grid(row=2, column=0, sticky="nsew", pady=5)
+    console_box.columnconfigure(0, weight=1)
+    console_box.rowconfigure(0, weight=1)
+    console = tk.Text(console_box, font=("Consolas", 10), bg="#111", fg="white", wrap="word")
+    console.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+
+    # === Init + Start Threads ===
+    load_roi_config()
+    init_gray_preview()
+
+    try:
+        pil = overlay_roi_and_badge(roi_frame_buffer, last_predict_text, last_predict_conf)
+        tkimg = to_tk(pil)
+        left_preview.configure(image=tkimg)
+        left_preview.image = tkimg
+        log("🟩 已載入並顯示 ROI 疊圖（初始化）")
+    except Exception as e:
+        log(f"⚠️ 初始化 ROI 疊圖失敗：{e}")
+
+    threading.Thread(target=roi_preview_loop, daemon=True).start()
+    threading.Thread(target=oxy_preview_loop, daemon=True).start()
+    log("📡 ROI & OXY 串流執行中")
+
+    if not ROBOWFLOW_ENABLED:
+        log("⚠ Roboflow 未啟用，將以 mock good 模式運行（不會觸發停止）")
+    if not TESS_OK:
+        log("⚠ 未安裝 pytesseract（OCR 無法運作）")
+
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
+
+
 # ========================== GUI 建構區 ==========================
-root = tk.Tk()
-root.title("Smart ROI Monitor v11 (Auto Layout + Resizable)")
-root.geometry("1200x850")
-root.configure(bg="#202020")
+# root = tk.Tk()
+# root.title("Smart ROI Monitor v11 (Auto Layout + Resizable)")
+# root.geometry("1200x850")
+# root.configure(bg="#202020")
 
-# ===== 全域伸展設定 =====
-root.rowconfigure(1, weight=1)
-root.columnconfigure(0, weight=1)
+# # ===== 全域伸展設定 =====
+# root.rowconfigure(1, weight=1)
+# root.columnconfigure(0, weight=1)
 
-# === 上方選單 ===
-menubar = tk.Menu(root)
-macro_menu = tk.Menu(menubar, tearoff=0)
-macro_menu.add_command(label="錄製巨集", command=record_main_macro)
-macro_menu.add_command(label="播放巨集", command=play_main_macro)
-macro_menu.add_command(label="停止巨集", command=stop_macro_play)
-macro_menu.add_separator()
-macro_menu.add_command(label="設定播放間隔", command=set_macro_delay)
-menubar.add_cascade(label="巨集", menu=macro_menu)
+# # === 上方選單 ===
+# menubar = tk.Menu(root)
+# macro_menu = tk.Menu(menubar, tearoff=0)
+# macro_menu.add_command(label="錄製巨集", command=record_main_macro)
+# macro_menu.add_command(label="播放巨集", command=play_main_macro)
+# macro_menu.add_command(label="停止巨集", command=stop_macro_play)
+# macro_menu.add_separator()
+# macro_menu.add_command(label="設定播放間隔", command=set_macro_delay)
+# menubar.add_cascade(label="巨集", menu=macro_menu)
 
-roi_menu = tk.Menu(menubar, tearoff=0)
-roi_menu.add_command(label="選取 ROI Main", command=lambda: select_roi("main"))
-roi_menu.add_command(label="選取 ROI Trigger", command=lambda: select_roi("trigger"))
-roi_menu.add_separator()
-roi_menu.add_command(label="重新載入 ROI 設定", command=load_roi_config)
-roi_menu.add_command(label="儲存 ROI 設定", command=save_roi_config)
-menubar.add_cascade(label="ROI 設定", menu=roi_menu)
-root.config(menu=menubar)
+# roi_menu = tk.Menu(menubar, tearoff=0)
+# roi_menu.add_command(label="選取 ROI Main", command=lambda: select_roi("main"))
+# roi_menu.add_command(label="選取 ROI Trigger", command=lambda: select_roi("trigger"))
+# roi_menu.add_separator()
+# roi_menu.add_command(label="重新載入 ROI 設定", command=load_roi_config)
+# roi_menu.add_command(label="儲存 ROI 設定", command=save_roi_config)
+# menubar.add_cascade(label="ROI 設定", menu=roi_menu)
+# root.config(menu=menubar)
 
-# === 狀態列 ===
-status_frame = tk.Frame(root, bg="#202020")
-status_frame.grid(row=0, column=0, sticky="ew", pady=5)
-status_label = tk.Label(status_frame, text="🔴 Idle", fg="red", bg="#202020", font=("Arial", 14, "bold"))
-status_label.pack(side="left", padx=10)
-tk.Button(status_frame, text="▶ 開始執行", bg="#3cb371", command=start_all).pack(side="left", padx=5)
-tk.Button(status_frame, text="⏹ 結束執行", bg="#ff6347", command=stop_all).pack(side="left", padx=5)
+# # === 狀態列 ===
+# status_frame = tk.Frame(root, bg="#202020")
+# status_frame.grid(row=0, column=0, sticky="ew", pady=5)
+# status_label = tk.Label(status_frame, text="🔴 Idle", fg="red", bg="#202020", font=("Arial", 14, "bold"))
+# status_label.pack(side="left", padx=10)
+# tk.Button(status_frame, text="▶ 開始執行", bg="#3cb371", command=start_all).pack(side="left", padx=5)
+# tk.Button(status_frame, text="⏹ 結束執行", bg="#ff6347", command=stop_all).pack(side="left", padx=5)
 
-# === 主框架 ===
-main_frame = tk.Frame(root, bg="#202020")
-main_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
-main_frame.columnconfigure(0, weight=1)
-main_frame.columnconfigure(1, weight=1)
-main_frame.rowconfigure(0, weight=1)
+# # === 主框架 ===
+# main_frame = tk.Frame(root, bg="#202020")
+# main_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
+# main_frame.columnconfigure(0, weight=1)
+# main_frame.columnconfigure(1, weight=1)
+# main_frame.rowconfigure(0, weight=1)
 
-# ================= 左側 ROI 區 =================
-left_frame = tk.Frame(main_frame, bg="#202020")
-left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-left_frame.rowconfigure(2, weight=1)
-left_frame.columnconfigure(0, weight=1)
+# # ================= 左側 ROI 區 =================
+# left_frame = tk.Frame(main_frame, bg="#202020")
+# left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+# left_frame.rowconfigure(2, weight=1)
+# left_frame.columnconfigure(0, weight=1)
 
-# ROI 主畫面
-roi_box = tk.LabelFrame(left_frame, text="ROI Stream", fg="white", bg="#202020")
-roi_box.grid(row=0, column=0, sticky="nsew", pady=5)
-roi_box.rowconfigure(0, weight=1)
-roi_box.columnconfigure(0, weight=1)
-left_preview = tk.Label(roi_box, bg="black")
-left_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+# # ROI 主畫面
+# roi_box = tk.LabelFrame(left_frame, text="ROI Stream", fg="white", bg="#202020")
+# roi_box.grid(row=0, column=0, sticky="nsew", pady=5)
+# roi_box.rowconfigure(0, weight=1)
+# roi_box.columnconfigure(0, weight=1)
+# left_preview = tk.Label(roi_box, bg="black")
+# left_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
 
-# 辨識結果
-roi_result_label = tk.Label(left_frame, text="辨識結果：—", fg="cyan", bg="#202020", font=("Consolas", 12))
-roi_result_label.grid(row=1, column=0, pady=5)
+# # 辨識結果
+# roi_result_label = tk.Label(left_frame, text="辨識結果：—", fg="cyan", bg="#202020", font=("Consolas", 12))
+# roi_result_label.grid(row=1, column=0, pady=5)
 
-# ROI 小預覽列
-roi_subframe = tk.Frame(left_frame, bg="#202020")
-roi_subframe.grid(row=2, column=0, sticky="nsew", pady=5)
-roi_subframe.columnconfigure(0, weight=1)
-roi_subframe.columnconfigure(1, weight=1)
+# # ROI 小預覽列
+# roi_subframe = tk.Frame(left_frame, bg="#202020")
+# roi_subframe.grid(row=2, column=0, sticky="nsew", pady=5)
+# roi_subframe.columnconfigure(0, weight=1)
+# roi_subframe.columnconfigure(1, weight=1)
 
-roi2_box = tk.LabelFrame(roi_subframe, text="ROI2 Trigger", fg="white", bg="#202020")
-roi2_box.grid(row=0, column=0, sticky="nsew", padx=4)
-roi2_box.rowconfigure(0, weight=1)
-roi2_box.columnconfigure(0, weight=1)
-roi2_preview = tk.Label(roi2_box, bg="black")
-roi2_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+# roi2_box = tk.LabelFrame(roi_subframe, text="ROI2 Trigger", fg="white", bg="#202020")
+# roi2_box.grid(row=0, column=0, sticky="nsew", padx=4)
+# roi2_box.rowconfigure(0, weight=1)
+# roi2_box.columnconfigure(0, weight=1)
+# roi2_preview = tk.Label(roi2_box, bg="black")
+# roi2_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
 
-roi1_box = tk.LabelFrame(roi_subframe, text="ROI1 Predict", fg="white", bg="#202020")
-roi1_box.grid(row=0, column=1, sticky="nsew", padx=4)
-roi1_box.rowconfigure(0, weight=1)
-roi1_box.columnconfigure(0, weight=1)
-roi1_preview = tk.Label(roi1_box, bg="black")
-roi1_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+# roi1_box = tk.LabelFrame(roi_subframe, text="ROI1 Predict", fg="white", bg="#202020")
+# roi1_box.grid(row=0, column=1, sticky="nsew", padx=4)
+# roi1_box.rowconfigure(0, weight=1)
+# roi1_box.columnconfigure(0, weight=1)
+# roi1_preview = tk.Label(roi1_box, bg="black")
+# roi1_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
 
-# ================= 右側 Oxygen + Log =================
-right_frame = tk.Frame(main_frame, bg="#202020")
-right_frame.grid(row=0, column=1, sticky="nsew")
-right_frame.columnconfigure(0, weight=1)
-right_frame.rowconfigure(2, weight=1)
+# # ================= 右側 Oxygen + Log =================
+# right_frame = tk.Frame(main_frame, bg="#202020")
+# right_frame.grid(row=0, column=1, sticky="nsew")
+# right_frame.columnconfigure(0, weight=1)
+# right_frame.rowconfigure(2, weight=1)
 
-oxy_box = tk.LabelFrame(right_frame, text="Oxygen Stream", fg="white", bg="#202020")
-oxy_box.grid(row=0, column=0, sticky="ew", pady=5)
-oxy_box.columnconfigure(0, weight=1)
-right_preview = tk.Label(oxy_box, bg="black")
-right_preview.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+# oxy_box = tk.LabelFrame(right_frame, text="Oxygen Stream", fg="white", bg="#202020")
+# oxy_box.grid(row=0, column=0, sticky="ew", pady=5)
+# oxy_box.columnconfigure(0, weight=1)
+# right_preview = tk.Label(oxy_box, bg="black")
+# right_preview.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
 
-oxy_value_label = tk.Label(right_frame, text="OCR 結果：—", fg="lime", bg="#202020", font=("Consolas", 12))
-oxy_value_label.grid(row=1, column=0, pady=5, sticky="ew")
+# oxy_value_label = tk.Label(right_frame, text="OCR 結果：—", fg="lime", bg="#202020", font=("Consolas", 12))
+# oxy_value_label.grid(row=1, column=0, pady=5, sticky="ew")
 
-console_box = tk.LabelFrame(right_frame, text="Console Log", fg="white", bg="#202020")
-console_box.grid(row=2, column=0, sticky="nsew", pady=5)
-console_box.columnconfigure(0, weight=1)
-console_box.rowconfigure(0, weight=1)
+# console_box = tk.LabelFrame(right_frame, text="Console Log", fg="white", bg="#202020")
+# console_box.grid(row=2, column=0, sticky="nsew", pady=5)
+# console_box.columnconfigure(0, weight=1)
+# console_box.rowconfigure(0, weight=1)
 
-console = tk.Text(console_box, font=("Consolas", 10), bg="#111", fg="white", wrap="word")
-console.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+# console = tk.Text(console_box, font=("Consolas", 10), bg="#111", fg="white", wrap="word")
+# console.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
-# === 初始化灰底畫面 ===
-def init_gray_preview():
-    g1 = to_tk(Image.fromarray(gray_frame(480, 270)))
-    g2 = to_tk(Image.fromarray(gray_frame(480, 100)))
-    left_preview.configure(image=g1); left_preview.image = g1
-    right_preview.configure(image=g2); right_preview.image = g2
-    log("🩶 初始灰底畫面已載入")
+# # === 初始化灰底畫面 ===
+# def init_gray_preview():
+#     g1 = to_tk(Image.fromarray(gray_frame(480, 270)))
+#     g2 = to_tk(Image.fromarray(gray_frame(480, 100)))
+#     left_preview.configure(image=g1); left_preview.image = g1
+#     right_preview.configure(image=g2); right_preview.image = g2
+#     log("🩶 初始灰底畫面已載入")
 
-# ===== 啟動區 =====
-load_roi_config()
-init_gray_preview()
+# # ===== 啟動區 =====
+# load_roi_config()
+# init_gray_preview()
 
-try:
-    pil = overlay_roi_and_badge(roi_frame_buffer, last_predict_text, last_predict_conf)
-    tkimg = to_tk(pil)
-    left_preview.configure(image=tkimg)
-    left_preview.image = tkimg
-    log("🟩 已載入並顯示 ROI 疊圖（初始化）")
-except Exception as e:
-    log(f"⚠️ 初始化 ROI 疊圖失敗：{e}")
+# try:
+#     pil = overlay_roi_and_badge(roi_frame_buffer, last_predict_text, last_predict_conf)
+#     tkimg = to_tk(pil)
+#     left_preview.configure(image=tkimg)
+#     left_preview.image = tkimg
+#     log("🟩 已載入並顯示 ROI 疊圖（初始化）")
+# except Exception as e:
+#     log(f"⚠️ 初始化 ROI 疊圖失敗：{e}")
 
+# # 啟動兩個獨立串流執行緒（不同 backend）
 # threading.Thread(target=roi_preview_loop, daemon=True).start()
-threading.Thread(target=oxy_preview_loop, daemon=True).start()
-log("📡 ROI 預覽串流執行中")
+# threading.Thread(target=oxy_preview_loop, daemon=True).start()
+# log("📡 ROI & OXY 串流執行中")
 
-if not ROBOWFLOW_ENABLED:
-    log("⚠ Roboflow 未啟用，將以 mock good 模式運行（不會觸發停止）")
-if not TESS_OK:
-    log("⚠ 未安裝 pytesseract（OCR 無法運作）")
+# if not ROBOWFLOW_ENABLED:
+#     log("⚠ Roboflow 未啟用，將以 mock good 模式運行（不會觸發停止）")
+# if not TESS_OK:
+#     log("⚠ 未安裝 pytesseract（OCR 無法運作）")
 
-
-
-
-# # ======== Debug OXY camera 連線 (在 Tkinter 啟動前) ========
-# import cv2
-
-# print(f"🧪 嘗試開啟 OXY camera: {OXY_STREAM_URL}")
-# cap = cv2.VideoCapture(OXY_STREAM_URL)
-# if not cap.isOpened():
-#     print("❌ 無法開啟 OXY camera，嘗試加上 ?dummy=param.mjpg 再試一次...")
-#     cap = cv2.VideoCapture(f"{OXY_STREAM_URL}?dummy=param.mjpg")
-
-# if not cap.isOpened():
-#     print("🚫 仍無法開啟 OXY camera，請確認網址或串流伺服器")
-# else:
-#     print("✅ OXY camera 串流已開啟，按 Q 關閉視窗")
-#     cv2.namedWindow("OXY Camera Debug", cv2.WINDOW_NORMAL)
-#     cv2.resizeWindow("OXY Camera Debug", 640, 360)
-#     while True:
-#         ok, frame = cap.read()
-#         if not ok or frame is None:
-#             print("⚠️ 無法讀取 OXY frame，串流可能中斷")
-#             break
-#         cv2.imshow("OXY Camera Debug", frame)
-#         if cv2.waitKey(1) & 0xFF == ord("q"):
-#             break
-#     cap.release()
-#     cv2.destroyAllWindows()
-# print("🟡 結束 OXY debug 模式，繼續啟動主程式...")
-# # ============================================================
-
-
-
-root.mainloop()
+# root.mainloop()
 
