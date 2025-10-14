@@ -361,7 +361,7 @@ def handle_emergency(source="ROI_BAD"):
 def roi_monitor_loop():
     """🔶 專職 ROI 觸發監測與推論（不更新畫面）"""
     prev_trig = None
-    while monitoring:
+    while monitoring and not _main_stop_event.is_set():
         frame = get_roi_frame()
         if frame is None or frame.size == 0:
             time.sleep(0.5)
@@ -394,7 +394,7 @@ def roi_preview_loop():
     cap = None
     reconnecting = False
 
-    log("📡 ROI 預覽執行中（FFMPEG backend）")
+    log("📡 ROI 預覽執行中（FFMPEG backend）（常駐）")
 
     while True:
         try:
@@ -447,6 +447,10 @@ def roi_preview_loop():
             cap = None
             time.sleep(1)
 
+    if cap:
+        cap.release()
+    log("🟥 ROI 預覽結束")
+
 # ================= OXY 分工版 =================
 
 # 🔹 OXY 畫面緩衝區（共享）
@@ -458,7 +462,7 @@ def oxy_preview_loop():
     cap = None
     reconnecting = False
 
-    log(f"📡 啟動 OXY 預覽（FFMPEG backend）: {url}")
+    log(f"📡 啟動 OXY 預覽（FFMPEG backend）（常駐）: {url}")
 
     while True:
         try:
@@ -519,18 +523,22 @@ def oxy_preview_loop():
                 cap.release()
             cap = None
             time.sleep(1)
+
+    if cap:
+        cap.release()
+    log("🟥 OXY 預覽結束")
 def oxy_monitor_loop():
-    """🧠 OXY 背景 OCR 偵測（僅文字分析，不更新 GUI 畫面）"""
-    global oxy_frame_buffer
+    """🧠 OXY 背景 OCR 偵測（永遠運行，無論 monitoring 狀態）"""
+    global oxy_frame_buffer, last_oxy_text, last_oxy_ok, debug_cond_high_oxy
+
     last_oxy_value = None
+    log("🧠 OXY 偵測執行中（持續運行模式）")
 
-    log("🧠 OXY 偵測執行中")
-
-    while monitoring:
+    while True and not _main_stop_event.is_set():
         try:
             frame = oxy_frame_buffer.copy()
             if frame is None or frame.size == 0:
-                time.sleep(0.2)
+                time.sleep(0.3)
                 continue
 
             # === 前處理 ===
@@ -560,25 +568,30 @@ def oxy_monitor_loop():
             match = re.findall(r"[0-9.]+", raw_text)
             text = match[0] if match else ""
 
-            # === 僅當結果改變才更新 Label ===
+            # === 更新顯示（即使 monitoring=False 也更新）===
             if text and text != last_oxy_value:
                 last_oxy_value = text
-                root.after(0, lambda val=text: oxy_value_label.config(
-                    text=f"OCR 結果：{val}"
+                last_oxy_text = text
+                root.after(0, lambda t=text: oxy_value_label.config(
+                    text=f"OCR 結果：{t}"
                 ))
+
                 try:
-                    val_num = float(val)
+                    val_num = float(text)
+                    last_oxy_ok = val_num <= oxy_threshold
                     if val_num > oxy_threshold:
                         debug_cond_high_oxy = True
                         log(f"🧨 OXY 值過高：{val_num} > {oxy_threshold}")
-                        handle_emergency("OXY HIGH")
+                        if monitoring:  # 只有在主程序執行時才觸發緊急停止
+                            handle_emergency("OXY HIGH")
                 except ValueError:
-                    pass
+                    last_oxy_ok = False
 
         except Exception as e:
             log(f"⚠️ OXY OCR 錯誤: {e}")
 
-        time.sleep(0.3)
+        time.sleep(0.5)
+
 
 # ============== Macro (Enhanced Loop + Scroll Support + ESC Safety) ==============
 import ctypes
@@ -816,9 +829,7 @@ def start_all():
     threading.Thread(target=_esc_safety_main_listener, daemon=True).start()
 
     # --- 分開職責 ---
-    threading.Thread(target=roi_preview_loop, daemon=True).start()
     threading.Thread(target=roi_monitor_loop, daemon=True).start()
-    threading.Thread(target=oxy_preview_loop, daemon=True).start()
     threading.Thread(target=oxy_monitor_loop, daemon=True).start()
     play_main_macro()
 
