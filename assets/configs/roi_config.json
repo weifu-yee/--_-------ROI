@@ -1,27 +1,27 @@
 {
   "roi_main": [
-    1313,
-    562,
-    383,
-    259
+    1306,
+    585,
+    377,
+    258
   ],
   "roi_trigger": [
-    528,
-    0,
-    134,
-    70
+    1814,
+    953,
+    68,
+    69
   ],
   "oxy_roi": [
-    229,
-    274,
-    367,
-    162
+    139,
+    352,
+    261,
+    114
   ],
-  "oxy_otsu_threshold": 72,
-  "oxy_brightness": 41,
-  "oxy_contrast": 22,
-  "oxy_gamma": 49,
-  "oxy_saturation": 0,
+  "oxy_otsu_threshold": 62,
+  "oxy_brightness": 44,
+  "oxy_contrast": 24,
+  "oxy_gamma": 51,
+  "oxy_saturation": 84,
   "roi_stream_url": "rtsp://nthummrl@gmail.com:nthummrl110@140.114.56.28:554/stream1",
   "oxy_stream_url": "http://140.114.56.28:8080/video?dummy=param.mjpg"
 }

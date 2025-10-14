@@ -105,8 +105,8 @@ def set_status(active:bool):
                             fg=("lime" if active else "red"))
 def save_roi_config():
     data = {
-        "roi_main": list(roi_main) if roi_main else None,
-        "roi_trigger": list(roi_trigger) if roi_trigger else None,
+        "roi_main": list(roi_main) if roi_main else None,          # 粉床 ROI
+        "roi_trigger": list(roi_trigger) if roi_trigger else None,  # 螢幕監聽 ROI
         "oxy_roi": list(oxy_roi) if oxy_roi else None,
         "oxy_otsu_threshold": oxy_otsu_threshold,
         "oxy_brightness": oxy_brightness,
@@ -141,6 +141,23 @@ def load_roi_config():
         ROI_PASSWORD   = d.get("roi_password", "")
 
         log(f"載入設定 | OTSU={oxy_otsu_threshold}, Bright={oxy_brightness}, Contrast={oxy_contrast}, Gamma={oxy_gamma}, Satur={oxy_saturation}")
+
+        # ✅ 若有螢幕監聽 ROI，顯示在螢幕預覽畫面中
+        if roi_trigger:
+            try:
+                import pyautogui
+                screenshot = pyautogui.screenshot()
+                frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+                x, y, w, h = roi_trigger
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 215, 0), 2)
+                cv2.putText(frame, "螢幕監聽 ROI", (x, max(20, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 215, 0), 2)
+                pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                tkimg = to_tk(pil, size=(480, 270))
+                left_preview.configure(image=tkimg)
+                left_preview.image = tkimg
+                log(f"🟦 已載入螢幕監聽 ROI 並顯示於畫面：{roi_trigger}")
+            except Exception as e:
+                log(f"⚠️ 無法更新螢幕監聽 ROI 畫面：{e}")
     else:
         log("（尚未有 ROI/Stream 設定）")
 
@@ -208,34 +225,18 @@ def get_oxy_frame():
         return frame
     except:
         return gray_frame(480, 270)
-# ============== Visual overlays ==============
-def overlay_roi_and_badge(frame_bgr, pred_text=None, pred_conf=None):
+# ============== Visual overlay ==============
+def overlay_powbed(frame_bgr, pred_text=None, pred_conf=None):
     img = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     pil = Image.fromarray(img)
     draw = ImageDraw.Draw(pil)
-    try: font = ImageFont.truetype("arial.ttf", 18)
+    try: font = ImageFont.truetype("arial.ttf", 60)
     except: font = ImageFont.load_default()
 
     if roi_main:
         x,y,w,h = roi_main
-        draw.rectangle([x, y, x+w, y+h], outline=(0,255,0), width=3)
-        draw.text((x, max(0,y-20)), "ROI1(Main)", fill=(0,255,0), font=font)
-    if roi_trigger:
-        x,y,w,h = roi_trigger
-        draw.rectangle([x, y, x+w, y+h], outline=(255,215,0), width=3)
-        draw.text((x, max(0,y-20)), "ROI2(Trigger)", fill=(255,215,0), font=font)
-    return pil
-def overlay_oxy(frame_bgr, oxy_text:str, ok:bool, show_warn_if_empty=True):
-    img = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    pil = Image.fromarray(img)
-    draw = ImageDraw.Draw(pil)
-    try: font = ImageFont.truetype("arial.ttf", 20)
-    except: font = ImageFont.load_default()
-    text = f"O2: {oxy_text}" if oxy_text else ("⚠ No reading" if show_warn_if_empty else "")
-    if text:
-        color = (50,205,50) if ok else (255,215,0)
-        draw.rectangle([10,10,10+240,42], fill=(0,0,0,128), outline=color, width=2)
-        draw.text((20,16), text, fill=color, font=font)
+        draw.rectangle([x, y, x+w, y+h], outline=(0,255,0), width=15)
+        draw.text((x, max(0,y-80)), "PowBed ROI", fill=(0,255,0), font=font)
     return pil
 
 # ============== ROI Trigger & Inference ==============
@@ -294,11 +295,11 @@ def do_inference_on_roi_frame(frame_bgr):
                     fg=color
                 )
 
-                # 成功推論後才更新 ROI1 預覽畫面
+                # 成功推論後才更新 powder_bed_roi 預覽畫面
                 roi_crop = crop.copy()
                 tkroi = to_tk(Image.fromarray(cv2.cvtColor(roi_crop, cv2.COLOR_BGR2RGB)), size=(360, 200))
-                root.after(0, lambda img=tkroi: roi1_preview.configure(image=img))
-                root.after(0, lambda img=tkroi: setattr(roi1_preview, "image", img))
+                root.after(0, lambda img=tkroi: powder_bed_roi_preview.configure(image=img))
+                root.after(0, lambda img=tkroi: setattr(powder_bed_roi_preview, "image", img))
 
                 # 若非 good 則觸發警示
                 if pred_class.lower() != "good":
@@ -357,8 +358,9 @@ def handle_emergency(source="ROI_BAD"):
     stop_all_monitoring(silent=True)
     show_alert(f"⚠️ 異常：{source}")
 
-# ============== ROI Monitor & Preview Loops ==============
-def roi_monitor_loop():
+# ============== Monitor & Preview Loops ==============
+oxy_frame_buffer = gray_frame(480, 100)     # 🔹 OXY 畫面緩衝區（共享）
+def powbed_monitor_loop():
     """🔶 專職 ROI 觸發監測與推論（不更新畫面）"""
     prev_trig = None
     while monitoring and not _main_stop_event.is_set():
@@ -387,146 +389,6 @@ def roi_monitor_loop():
             prev_trig = trig
 
         time.sleep(trigger_update_interval)
-def roi_preview_loop():
-    """🖼 專職 ROI 畫面顯示更新（FFmpeg + thread-safe GUI 更新）"""
-    global roi_frame_buffer
-    url = ROI_STREAM_URL
-    cap = None
-    reconnecting = False
-
-    log("📡 ROI 預覽執行中（FFMPEG backend）（常駐）")
-
-    while True:
-        try:
-            # === 重新連線處理 ===
-            if cap is None or not cap.isOpened():
-                if not reconnecting:
-                    reconnecting = True
-                    log("🔴 ROI 串流中斷，重新連線中...")
-                    gray = gray_frame(640, 480)
-                    pil = Image.fromarray(gray)
-                    draw = ImageDraw.Draw(pil)
-                    draw.text((200, 230), "ROI Reconnecting...", fill=(255, 0, 0))
-                    tkimg = to_tk(pil, size=(480, 270))
-                    root.after(0, lambda img=tkimg: left_preview.configure(image=img))
-                    root.after(0, lambda img=tkimg: setattr(left_preview, "image", img))
-                cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
-                time.sleep(2)
-                continue
-
-            # === 正常取 frame ===
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                cap.release()
-                cap = None
-                time.sleep(1)
-                continue
-
-            reconnecting = False
-            roi_frame_buffer = frame.copy()
-
-            # === 主畫面更新 ===
-            pil = overlay_roi_and_badge(frame, last_predict_text, last_predict_conf)
-            tkimg = to_tk(pil, size=(480, 270))
-            root.after(0, lambda img=tkimg: left_preview.configure(image=img))
-            root.after(0, lambda img=tkimg: setattr(left_preview, "image", img))
-
-            # === ROI Trigger 小預覽（非觸發檢測，只顯示） ===
-            if roi_trigger:
-                x, y, w, h = roi_trigger
-                roi2_crop = frame[y:y+h, x:x+w]
-                tkroi2 = to_tk(Image.fromarray(cv2.cvtColor(roi2_crop, cv2.COLOR_BGR2RGB)), size=(120, 120))
-                root.after(0, lambda img=tkroi2: roi2_preview.configure(image=img))
-                root.after(0, lambda img=tkroi2: setattr(roi2_preview, "image", img))
-
-            time.sleep(0.05)
-
-        except Exception as e:
-            log(f"⚠️ ROI 預覽錯誤：{e}")
-            cap = None
-            time.sleep(1)
-
-    if cap:
-        cap.release()
-    log("🟥 ROI 預覽結束")
-
-# ================= OXY 分工版 =================
-
-# 🔹 OXY 畫面緩衝區（共享）
-oxy_frame_buffer = gray_frame(480, 100)
-def oxy_preview_loop():
-    """🖼 OXY 畫面預覽（只負責顯示，不做 OCR）"""
-    global oxy_frame_buffer, OXY_STREAM_URL, oxy_roi
-    url = OXY_STREAM_URL
-    cap = None
-    reconnecting = False
-
-    log(f"📡 啟動 OXY 預覽（FFMPEG backend）（常駐）: {url}")
-
-    while True:
-        try:
-            # === 若尚未開啟或中斷 → 重新連線 ===
-            if cap is None or not cap.isOpened():
-                if not reconnecting:
-                    reconnecting = True
-                    log("🟡 OXY 串流中斷，重新連線中...")
-                    gray = gray_frame(480, 100)
-                    pil = Image.fromarray(gray)
-                    draw = ImageDraw.Draw(pil)
-                    draw.text((150, 40), "OXY Reconnecting...", fill=(255, 255, 0))
-                    tkimg = to_tk(pil)
-                    root.after(0, lambda img=tkimg: right_preview.configure(image=img))
-                    root.after(0, lambda img=tkimg: setattr(right_preview, "image", img))
-
-                cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                cap.set(cv2.CAP_PROP_FPS, 30)
-                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000)
-                time.sleep(1)
-                continue
-
-            ok, frame = cap.read()
-            if not ok or frame is None or frame.size == 0:
-                log("⚠️ OXY 無法讀取 frame，嘗試重連...")
-                cap.release()
-                cap = None
-                time.sleep(1)
-                continue
-
-            reconnecting = False
-
-            # === ROI 裁切（防呆）===
-            if oxy_roi and frame is not None and frame.size > 0:
-                x, y, w, h = oxy_roi
-                h_max, w_max = frame.shape[:2]
-                x = max(0, min(x, w_max - 1))
-                y = max(0, min(y, h_max - 1))
-                w = min(w, w_max - x)
-                h = min(h, h_max - y)
-                frame = frame[y:y+h, x:x+w].copy()
-
-            # === 更新共享 buffer ===
-            oxy_frame_buffer = frame.copy()
-
-            # === 顯示畫面（thread-safe）===
-            pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            tkimg = to_tk(pil)
-            root.after(0, lambda img=tkimg: right_preview.configure(image=img))
-            root.after(0, lambda img=tkimg: setattr(right_preview, "image", img))
-
-            time.sleep(0.05)
-
-        except Exception as e:
-            log(f"❌ OXY 預覽錯誤: {e}")
-            if cap:
-                cap.release()
-            cap = None
-            time.sleep(1)
-
-    if cap:
-        cap.release()
-    log("🟥 OXY 預覽結束")
 def oxy_monitor_loop():
     """🧠 OXY 背景 OCR 偵測（永遠運行，無論 monitoring 狀態）"""
     global oxy_frame_buffer, last_oxy_text, last_oxy_ok, debug_cond_high_oxy
@@ -592,6 +454,186 @@ def oxy_monitor_loop():
 
         time.sleep(0.5)
 
+def powbed_preview_loop():
+    """🖼 專職 ROI 畫面顯示更新（FFmpeg + thread-safe GUI 更新）"""
+    global roi_frame_buffer
+    url = ROI_STREAM_URL
+    cap = None
+    reconnecting = False
+
+    log("📡 ROI 預覽執行中（FFMPEG backend）（常駐）")
+
+    while True:
+        try:
+            # === 重新連線處理 ===
+            if cap is None or not cap.isOpened():
+                if not reconnecting:
+                    reconnecting = True
+                    log("🔴 ROI 串流中斷，重新連線中...")
+                    gray = gray_frame(640, 480)
+                    pil = Image.fromarray(gray)
+                    draw = ImageDraw.Draw(pil)
+                    font = ImageFont.truetype("arial.ttf", 48)
+                    draw.text((60, 230), "PowBed Reconnecting...", fill=(255, 0, 0), font=font)
+                    tkimg = to_tk(pil, size=(480, 270))
+                    root.after(0, lambda img=tkimg: left_preview.configure(image=img))
+                    root.after(0, lambda img=tkimg: setattr(left_preview, "image", img))
+                cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
+                time.sleep(2)
+                continue
+
+            # === 正常取 frame ===
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                cap.release()
+                cap = None
+                time.sleep(1)
+                continue
+
+            reconnecting = False
+            roi_frame_buffer = frame.copy()
+
+            # === 主畫面更新 ===
+            pil = overlay_powbed(frame, last_predict_text, last_predict_conf)
+            tkimg = to_tk(pil, size=(480, 270))
+            root.after(0, lambda img=tkimg: left_preview.configure(image=img))
+            root.after(0, lambda img=tkimg: setattr(left_preview, "image", img))
+
+            time.sleep(0.05)
+
+        except Exception as e:
+            log(f"⚠️ 粉床預覽錯誤：{e}")
+            cap = None
+            time.sleep(1)
+def oxy_preview_loop():
+    """🖼 OXY 畫面預覽（只負責顯示，不做 OCR）"""
+    global oxy_frame_buffer, OXY_STREAM_URL, oxy_roi
+    url = OXY_STREAM_URL
+    cap = None
+    reconnecting = False
+
+    log(f"📡 啟動 OXY 預覽（FFMPEG backend）（常駐）: {url}")
+
+    while True:
+        try:
+            # === 若尚未開啟或中斷 → 重新連線 ===
+            if cap is None or not cap.isOpened():
+                if not reconnecting:
+                    reconnecting = True
+                    log("🟡 OXY 串流中斷，重新連線中...")
+                    gray = gray_frame(480, 100)
+                    pil = Image.fromarray(gray)
+                    draw = ImageDraw.Draw(pil)
+                    font = ImageFont.truetype("arial.ttf", 30)
+                    draw.text((40, 40), "OXY Reconnecting...", fill=(255, 255, 0), font=font)
+                    tkimg = to_tk(pil)
+                    root.after(0, lambda img=tkimg: right_preview.configure(image=img))
+                    root.after(0, lambda img=tkimg: setattr(right_preview, "image", img))
+
+                cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                cap.set(cv2.CAP_PROP_FPS, 30)
+                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000)
+                time.sleep(1)
+                continue
+
+            ok, frame = cap.read()
+            if not ok or frame is None or frame.size == 0:
+                log("⚠️ OXY 無法讀取 frame，嘗試重連...")
+                cap.release()
+                cap = None
+                time.sleep(1)
+                continue
+
+            reconnecting = False
+
+            # === ROI 裁切（防呆）===
+            if oxy_roi and frame is not None and frame.size > 0:
+                x, y, w, h = oxy_roi
+                h_max, w_max = frame.shape[:2]
+                x = max(0, min(x, w_max - 1))
+                y = max(0, min(y, h_max - 1))
+                w = min(w, w_max - x)
+                h = min(h, h_max - y)
+                frame = frame[y:y+h, x:x+w].copy()
+
+            # === 更新共享 buffer ===
+            oxy_frame_buffer = frame.copy()
+
+            # === 顯示畫面（thread-safe）===
+            pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            tkimg = to_tk(pil)
+            root.after(0, lambda img=tkimg: right_preview.configure(image=img))
+            root.after(0, lambda img=tkimg: setattr(right_preview, "image", img))
+
+            time.sleep(0.05)
+
+        except Exception as e:
+            log(f"❌ OXY 預覽錯誤: {e}")
+            if cap:
+                cap.release()
+            cap = None
+            time.sleep(1)
+
+    if cap:
+        cap.release()
+    log("🟥 OXY 預覽結束")
+def screen_roi_preview_loop():
+    """🖥 永久運行的螢幕監聽 ROI 即時預覽"""
+    import pyautogui
+    global roi_trigger
+
+    log("📺 螢幕監聽 ROI 預覽執行中（持續更新）")
+
+    while True:
+        try:
+            if roi_trigger is None:
+                # 沒設定 ROI，就顯示提示畫面
+                gray = gray_frame(200, 120)
+                pil = Image.fromarray(gray)
+                draw = ImageDraw.Draw(pil)
+                draw.text((30, 50), "No Screen ROI", fill=(255, 255, 0))
+                tkimg = to_tk(pil, size=(120, 120))
+                root.after(0, lambda img=tkimg: trigger_roi_preview.configure(image=img))
+                root.after(0, lambda img=tkimg: setattr(trigger_roi_preview, "image", img))
+                time.sleep(1.0)
+                continue
+
+            # 擷取整個螢幕畫面
+            screenshot = pyautogui.screenshot()
+            frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+
+            # 確保 ROI 合法範圍
+            x, y, w, h = roi_trigger
+            h_max, w_max = frame.shape[:2]
+            x = max(0, min(x, w_max - 1))
+            y = max(0, min(y, h_max - 1))
+            w = min(w, w_max - x)
+            h = min(h, h_max - y)
+
+            roi_crop = frame[y:y+h, x:x+w].copy()
+
+            # 若 ROI 區域過小（例如 0x0），跳過
+            if roi_crop.size == 0:
+                time.sleep(1.0)
+                continue
+
+            # 轉換成 Tk 影像顯示
+            pil = Image.fromarray(cv2.cvtColor(roi_crop, cv2.COLOR_BGR2RGB))
+            tkimg = to_tk(pil, size=(120, 120))
+            root.after(0, lambda img=tkimg: trigger_roi_preview.configure(image=img))
+            root.after(0, lambda img=tkimg: setattr(trigger_roi_preview, "image", img))
+
+        except Exception as e:
+            log(f"⚠️ 螢幕 ROI 預覽錯誤: {e}")
+            gray = gray_frame(200, 120)
+            tkimg = to_tk(Image.fromarray(gray), size=(120, 120))
+            root.after(0, lambda img=tkimg: trigger_roi_preview.configure(image=img))
+            root.after(0, lambda img=tkimg: setattr(trigger_roi_preview, "image", img))
+            time.sleep(2)
+
+        time.sleep(0.5)
 
 # ============== Macro (Enhanced Loop + Scroll Support + ESC Safety) ==============
 import ctypes
@@ -829,7 +871,7 @@ def start_all():
     threading.Thread(target=_esc_safety_main_listener, daemon=True).start()
 
     # --- 分開職責 ---
-    threading.Thread(target=roi_monitor_loop, daemon=True).start()
+    threading.Thread(target=powbed_monitor_loop, daemon=True).start()
     threading.Thread(target=oxy_monitor_loop, daemon=True).start()
     play_main_macro()
 
@@ -883,13 +925,54 @@ def select_roi(which="main"):
     # 更新預覽畫面顯示新的 ROI（即使沒在監測）
     try:
         frame = roi_frame_buffer.copy()
-        pil = overlay_roi_and_badge(frame)
+        pil = overlay_powbed(frame)
         tkimg = to_tk(pil, size=(480, 270))
         left_preview.configure(image=tkimg)
         left_preview.image = tkimg
         log("🟩 ROI 已顯示於預覽畫面")
     except Exception as e:
         log(f"⚠️ 無法更新預覽畫面：{e}")
+def select_screen_roi():
+    """
+    🖥 從螢幕截圖中選取「螢幕監聽 ROI」
+    使用 roi_trigger 作為儲存欄位，以沿用原有結構。
+    """
+    import pyautogui
+    global roi_trigger
+
+    log("🖥 開始選取螢幕監聽 ROI")
+
+    try:
+        # 1️⃣ 擷取整個螢幕畫面
+        screenshot = pyautogui.screenshot()
+        frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+
+        # 2️⃣ 開啟 OpenCV 選取工具
+        roi = cv2.selectROI("Select Screen ROI", frame, showCrosshair=True)
+        cv2.destroyAllWindows()
+
+        if roi == (0, 0, 0, 0):
+            log("❌ 未選取任何螢幕區域")
+            return
+
+        roi_trigger = tuple(map(int, roi))
+        log(f"✅ 設定螢幕監聽 ROI = {roi_trigger}")
+
+        # 3️⃣ 儲存到現有設定檔
+        save_roi_config()
+
+        # 4️⃣ 更新主畫面預覽（僅標示範圍）
+        try:
+            pil = overlay_powbed(roi_frame_buffer, last_predict_text, last_predict_conf)
+            tkimg = to_tk(pil, size=(480, 270))
+            left_preview.configure(image=tkimg)
+            left_preview.image = tkimg
+            log("🟦 螢幕監聽 ROI 已顯示於預覽畫面")
+        except Exception as e:
+            log(f"⚠️ 無法更新預覽畫面：{e}")
+
+    except Exception as e:
+        log(f"❌ 螢幕 ROI 選取錯誤: {e}")
 def select_oxy_roi():
     """開啟目前 OXY 畫面讓使用者框選顯示範圍"""
     global oxy_roi
@@ -1062,7 +1145,7 @@ def reset_safety_conditions():
     log("✅ 使用者確認問題已排除，安全狀態已恢復正常")
 # ============== Main App ==============
 def main():
-    global root, left_preview, right_preview, roi1_preview, roi2_preview
+    global root, left_preview, right_preview, powder_bed_roi_preview, trigger_roi_preview
     global oxy_value_label, roi_result_label, console, status_label
 
     root = tk.Tk()
@@ -1081,9 +1164,9 @@ def main():
     menubar.add_cascade(label="巨集", menu=macro_menu)
 
     roi_menu = tk.Menu(menubar, tearoff=0)
-    roi_menu.add_command(label="選取 ROI Main", command=lambda: select_roi("main"))
-    roi_menu.add_command(label="選取 ROI Trigger", command=lambda: select_roi("trigger"))
-    roi_menu.add_command(label="選取 OXY ROI", command=select_oxy_roi)  # ✅ 新增
+    roi_menu.add_command(label="選取粉床 ROI (Main)", command=lambda: select_roi("main"))
+    roi_menu.add_command(label="選取螢幕監聽 ROI", command=select_screen_roi)
+    roi_menu.add_command(label="選取 OXY ROI", command=select_oxy_roi)
     roi_menu.add_separator()
     roi_menu.add_command(label="重新載入 ROI 設定", command=load_roi_config)
     roi_menu.add_command(label="儲存 ROI 設定", command=save_roi_config)
@@ -1135,7 +1218,7 @@ def main():
     left_frame.columnconfigure(0, weight=2)
     left_frame.rowconfigure(2, weight=1)
 
-    roi_box = tk.LabelFrame(left_frame, text="ROI Stream", fg="white", bg="#202020")
+    roi_box = tk.LabelFrame(left_frame, text="粉床 Stream", fg="white", bg="#202020")
     roi_box.grid(row=0, column=0, sticky="nsew", pady=5)
     left_preview = tk.Label(roi_box, bg="black")
     left_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
@@ -1148,15 +1231,15 @@ def main():
     roi_subframe.columnconfigure(0, weight=1)
     roi_subframe.columnconfigure(1, weight=1)
 
-    roi2_box = tk.LabelFrame(roi_subframe, text="ROI2 Trigger", fg="white", bg="#202020")
-    roi2_box.grid(row=0, column=0, sticky="nsew", padx=4)
-    roi2_preview = tk.Label(roi2_box, bg="black")
-    roi2_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+    powder_bed_roi_box = tk.LabelFrame(roi_subframe, text="粉床 ROI Predict", fg="white", bg="#202020")
+    powder_bed_roi_box.grid(row=0, column=0, sticky="nsew", padx=4)
+    powder_bed_roi_preview = tk.Label(powder_bed_roi_box, bg="black")
+    powder_bed_roi_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
 
-    roi1_box = tk.LabelFrame(roi_subframe, text="ROI1 Predict", fg="white", bg="#202020")
-    roi1_box.grid(row=0, column=1, sticky="nsew", padx=4)
-    roi1_preview = tk.Label(roi1_box, bg="black")
-    roi1_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+    trigger_roi_box = tk.LabelFrame(roi_subframe, text="螢幕監聽 ROI", fg="white", bg="#202020")
+    trigger_roi_box.grid(row=0, column=1, sticky="nsew", padx=4)
+    trigger_roi_preview = tk.Label(trigger_roi_box, bg="black")
+    trigger_roi_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
 
     # ----- Right (OXY + Console) -----
     right_frame = tk.Frame(main_frame, bg="#202020")
@@ -1169,7 +1252,7 @@ def main():
     oxy_wrapper.grid_propagate(False)  # ✅ 固定寬度，不讓子元件自動撐開
     oxy_box = tk.LabelFrame(
         oxy_wrapper,
-        text="Oxygen Stream",
+        text="氧氣 Stream",
         fg="white",
         bg="#202020"
     )
@@ -1194,7 +1277,7 @@ def main():
     init_gray_preview()
 
     try:
-        pil = overlay_roi_and_badge(roi_frame_buffer, last_predict_text, last_predict_conf)
+        pil = overlay_powbed(roi_frame_buffer, last_predict_text, last_predict_conf)
         tkimg = to_tk(pil)
         left_preview.configure(image=tkimg)
         left_preview.image = tkimg
@@ -1202,9 +1285,10 @@ def main():
     except Exception as e:
         log(f"⚠️ 初始化 ROI 疊圖失敗：{e}")
 
-    threading.Thread(target=roi_preview_loop, daemon=True).start()
+    threading.Thread(target=powbed_preview_loop, daemon=True).start()
     threading.Thread(target=oxy_preview_loop, daemon=True).start()
-    log("📡 ROI & OXY 串流執行中")
+    threading.Thread(target=screen_roi_preview_loop, daemon=True).start()
+    log("📡 粉床 & 氧氣 串流執行中、trigger螢幕監聽中")
 
     if not ROBOWFLOW_ENABLED:
         log("⚠ Roboflow 未啟用，將以 mock good 模式運行（不會觸發停止）")
