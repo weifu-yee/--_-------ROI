@@ -73,6 +73,8 @@ last_predict_conf = 0.0
 last_oxy_text     = "—"
 last_oxy_ok       = False
 
+SCROLL_SCALE = 120.0  # 🧭 補償倍率，可依實際手感微調
+
 if ROBOWFLOW_ENABLED:
     try:
         client = InferenceHTTPClient(api_url="https://serverless.roboflow.com", api_key="RnGFo8AzPLZNtcop9YZ0")
@@ -580,17 +582,66 @@ def oxy_preview_loop():
 
 # ============== Macro (Enhanced Loop + Scroll Support) ==============
 import ctypes
-macro_events = []
-macro_play_stop = False
-macro_loop_delay = 3.0  # 🕒 每輪播放間隔秒數（可由使用者設定）
+import threading
 
-def get_scroll_lines():
-    """取得 Windows 系統目前設定的滾動行數（預設 3）"""
-    SPI_GETWHEELSCROLLLINES = 0x0068
-    lines = ctypes.c_int()
-    ctypes.windll.user32.SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, ctypes.byref(lines), 0)
-    return lines.value if lines.value > 0 else 3
+# 共享狀態
+macro_events = []
+macro_loop_delay = 3.0  # 🕒 每輪播放間隔秒數（可由使用者設定）
+_macro_stop_event = threading.Event()
+_macro_thread = None
+
+def _normalize_key_name(k_str: str):
+    """
+    將 pynput 記錄的 key 字串（如 'a', 'Key.enter'）轉為 pyautogui 可處理的名稱。
+    回傳 (key_name, is_text)；is_text=True 時用 typewrite，否則用 press。
+    """
+    k_str = k_str.replace("'", "").strip()  # e.g. "'a'" -> a
+
+    # 單一可見字元（字母、數字、符號）
+    if len(k_str) == 1:
+        return k_str, True  # 用 typewrite
+
+    # 常見特殊鍵映射
+    mapping = {
+        "Key.enter": "enter",
+        "Key.tab": "tab",
+        "Key.backspace": "backspace",
+        "Key.delete": "delete",
+        "Key.space": "space",
+        "Key.esc": "esc",
+        "Key.escape": "esc",
+        "Key.up": "up",
+        "Key.down": "down",
+        "Key.left": "left",
+        "Key.right": "right",
+        "Key.home": "home",
+        "Key.end": "end",
+        "Key.page_up": "pageup",
+        "Key.page_down": "pagedown",
+        "Key.shift": "shift",
+        "Key.shift_r": "shift",
+        "Key.ctrl": "ctrl",
+        "Key.ctrl_r": "ctrl",
+        "Key.alt": "alt",
+        "Key.alt_r": "alt",
+        "Key.cmd": "win",
+        "Key.cmd_r": "win",
+        "Key.caps_lock": "capslock",
+        "Key.print_screen": "printscreen",
+        "Key.num_lock": "numlock",
+        "Key.scroll_lock": "scrolllock",
+        # 功能鍵
+        "Key.f1": "f1", "Key.f2": "f2", "Key.f3": "f3", "Key.f4": "f4",
+        "Key.f5": "f5", "Key.f6": "f6", "Key.f7": "f7", "Key.f8": "f8",
+        "Key.f9": "f9", "Key.f10": "f10", "Key.f11": "f11", "Key.f12": "f12",
+    }
+    if k_str in mapping:
+        return mapping[k_str], False
+
+    # 其他不支援的複合鍵或未列入者，忽略
+    return None, False
 def record_main_macro():
+    """開始錄製（按 ESC 結束），輸出至 MACRO_FILE。"""
     if not PYNPUT_OK:
         messagebox.showwarning("提示", "未安裝 pynput。")
         return
@@ -602,30 +653,31 @@ def record_main_macro():
         log("🎬 開始錄製（按 ESC 結束）")
 
         start = time.time()
-        scroll_lines = get_scroll_lines()
 
         def on_click(x, y, btn, pressed):
             macro_events.append({
-                "t": time.time()-start,
+                "t": time.time() - start,
                 "type": "click",
-                "x": x, "y": y,
+                "x": int(x), "y": int(y),
                 "btn": str(btn),
-                "pressed": pressed
+                "pressed": bool(pressed)  # True = press, False = release
             })
 
         def on_scroll(x, y, dx, dy):
+            # Windows: 往上 dy>0；pyautogui.scroll(): 正值 = 向上
+            # 我們錄製保留系統方向，重播時無需反轉
             macro_events.append({
-                "t": time.time()-start,
+                "t": time.time() - start,
                 "type": "scroll",
-                "x": x, "y": y,
-                "dx": dx, "dy": dy * scroll_lines
+                "x": int(x), "y": int(y),
+                "dx": int(dx), "dy": int(dy)
             })
 
         def on_key(k):
             if k == keyboard.Key.esc:
-                return False
+                return False  # 停止錄製
             macro_events.append({
-                "t": time.time()-start,
+                "t": time.time() - start,
                 "type": "key",
                 "key": str(k)
             })
@@ -634,65 +686,126 @@ def record_main_macro():
         kl = keyboard.Listener(on_press=on_key)
         ml.start()
         kl.start()
-        kl.join()  # 停止鍵盤監聽
+        kl.join()   # 等待鍵盤監聽結束（按 ESC）
         ml.stop()
 
-        json.dump(macro_events, open(MACRO_FILE, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+        json.dump(macro_events, open(MACRO_FILE, "w", encoding="utf-8"),
+                  indent=2, ensure_ascii=False)
         set_status(False)
-        log("✅ 錄製完成")
+        log("✅ 錄製完成，已儲存巨集事件")
 
     threading.Thread(target=_record_thread, daemon=True).start()
 def play_main_macro():
+    """無限循環播放巨集，直到 stop_macro_play()。"""
+    global _macro_thread
+
     if not os.path.exists(MACRO_FILE):
         messagebox.showwarning("提示", "沒有可播放的巨集。")
         return
 
-    def _run():
-        global macro_play_stop
-        macro_play_stop = False
-        scroll_lines = get_scroll_lines()
-        log(f"▶ 無限播放巨集，間隔 {macro_loop_delay:.1f} 秒（每次滾動 {scroll_lines} 行）")
-
+    # 匯入 pyautogui（可能未安裝）
+    try:
         import pyautogui
-        while not macro_play_stop:
-            ev = json.load(open(MACRO_FILE, "r", encoding="utf-8"))
-            t0 = time.time()
-            for e in ev:
-                if macro_play_stop or not monitoring:
+    except Exception as e:
+        log(f"❌ 缺少 pyautogui，無法播放巨集：{e}")
+        return
+
+    # 載入事件一次（避免反覆 I/O）
+    try:
+        with open(MACRO_FILE, "r", encoding="utf-8") as f:
+            events = json.load(f)
+    except Exception as e:
+        log(f"❌ 讀取巨集檔失敗：{e}")
+        return
+
+    # 安全清除停止事件
+    _macro_stop_event.clear()
+
+    def _run():
+        try:
+            log(f"▶ 無限播放巨集，間隔 {macro_loop_delay:.1f} 秒")
+
+            while not _macro_stop_event.is_set():
+                t0 = time.time()
+                for e in events:
+                    if _macro_stop_event.is_set():
+                        break
+
+                    # 時間對齊
+                    delay = e.get("t", 0) - (time.time() - t0)
+                    if delay > 0:
+                        # 等待期間也可被中止
+                        waited = 0.0
+                        while waited < delay and not _macro_stop_event.is_set():
+                            time.sleep(min(0.01, delay - waited))
+                            waited += 0.01
+                        if _macro_stop_event.is_set():
+                            break
+
+                    etype = e.get("type")
+                    try:
+                        if etype == "click":
+                            x, y = int(e.get("x", 0)), int(e.get("y", 0))
+                            pressed = bool(e.get("pressed", True))
+                            # 將 press/release 分離，支援拖曳
+                            if pressed:
+                                pyautogui.mouseDown(x, y)
+                            else:
+                                pyautogui.mouseUp(x, y)
+
+                        elif etype == "scroll":
+                            dy = int(e.get("dy", 0))
+                            pyautogui.scroll(int(dy * SCROLL_SCALE))
+
+                        elif etype == "key":
+                            key_raw = e.get("key", "")
+                            key_name, is_text = _normalize_key_name(key_raw)
+                            if not key_name:
+                                # 不支援的鍵，略過
+                                continue
+                            if is_text:
+                                pyautogui.typewrite(key_name)
+                            else:
+                                pyautogui.press(key_name)
+
+                    except Exception as ie:
+                        log(f"⚠️ 巨集事件執行失敗：{ie}")
+
+                if _macro_stop_event.is_set():
                     break
-                delay = e["t"] - (time.time() - t0)
-                if delay > 0:
-                    time.sleep(delay)
 
-                if e["type"] == "click" and e.get("pressed", True):
-                    pyautogui.click(e["x"], e["y"])
-                elif e["type"] == "key":
-                    key = e["key"].replace("'", "")
-                    if len(key) == 1:
-                        pyautogui.typewrite(key)
-                elif e["type"] == "scroll":
-                    pyautogui.scroll(int(e["dy"]))  # 方向與 Windows 設定一致
+                log(f"⏸ 等待 {macro_loop_delay:.1f}s 後重播")
+                waited = 0.0
+                while waited < macro_loop_delay and not _macro_stop_event.is_set():
+                    time.sleep(min(0.05, macro_loop_delay - waited))
+                    waited += 0.05
 
-            if macro_play_stop:
-                break
+        finally:
+            log("🟥 巨集播放結束")
 
-            log(f"⏸ 等待 {macro_loop_delay:.1f}s 後重播")
-            time.sleep(macro_loop_delay)
+    # 避免重複啟動多條播放緒
+    if _macro_thread and _macro_thread.is_alive():
+        log("ℹ️ 巨集已在播放中，忽略本次啟動請求")
+        return
 
-        log("🟥 巨集播放結束")
-
-    threading.Thread(target=_run, daemon=True).start()
+    _macro_thread = threading.Thread(target=_run, daemon=True, name="macro_player")
+    _macro_thread.start()
 def stop_macro_play():
-    global macro_play_stop
-    macro_play_stop = True
+    """停止巨集播放（不中斷其他監測）。"""
+    _macro_stop_event.set()
     log("🟥 停止巨集")
 def set_macro_delay():
     """彈出對話框讓使用者設定播放間隔秒數"""
     global macro_loop_delay
-    val = tk.simpledialog.askfloat("設定播放間隔", "請輸入每次巨集播放間隔（秒）", minvalue=0.5, initialvalue=macro_loop_delay)
-    if val is not None:
-        macro_loop_delay = val
-        log(f"⚙️ 已設定播放間隔：{macro_loop_delay:.1f} 秒")
+    try:
+        val = tk.simpledialog.askfloat("設定播放間隔", "請輸入每次巨集播放間隔（秒）",
+                                       minvalue=0.2, initialvalue=macro_loop_delay)
+        if val is not None:
+            macro_loop_delay = float(val)
+            log(f"⚙️ 已設定播放間隔：{macro_loop_delay:.1f} 秒")
+    except Exception as e:
+        log(f"⚠️ 設定播放間隔失敗：{e}")
+# ============== End Macro =====================================================
 
 # ============== Start/Stop ==============
 def start_all():
