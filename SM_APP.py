@@ -51,6 +51,7 @@ recording = False
 
 roi_main = None
 roi_trigger = None
+oxy_roi = None
 
 trigger_update_interval = 0.15
 trigger_delay_after_gray = 1.2
@@ -88,18 +89,22 @@ def set_status(active:bool):
         status_label.config(text=("🟢 Active" if active else "🔴 Idle"),
                             fg=("lime" if active else "red"))
 def save_roi_config():
-    data = {"roi_main": list(roi_main) if roi_main else None,
-            "roi_trigger": list(roi_trigger) if roi_trigger else None,
-            "roi_stream_url": ROI_STREAM_URL,
-            "oxy_stream_url": OXY_STREAM_URL}
+    data = {
+        "roi_main": list(roi_main) if roi_main else None,
+        "roi_trigger": list(roi_trigger) if roi_trigger else None,
+        "oxy_roi": list(oxy_roi) if oxy_roi else None,  # ✅ 新增
+        "roi_stream_url": ROI_STREAM_URL,
+        "oxy_stream_url": OXY_STREAM_URL
+    }
     json.dump(data, open(ROI_FILE, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
     log("✅ ROI/Stream 設定已儲存")
 def load_roi_config():
-    global roi_main, roi_trigger, ROI_STREAM_URL, OXY_STREAM_URL, ROI_USERNAME, ROI_PASSWORD
+    global roi_main, roi_trigger, oxy_roi, ROI_STREAM_URL, OXY_STREAM_URL, ROI_USERNAME, ROI_PASSWORD
     if os.path.exists(ROI_FILE):
         d = json.load(open(ROI_FILE, "r", encoding="utf-8"))
         roi_main    = tuple(d.get("roi_main")) if d.get("roi_main") else None
         roi_trigger = tuple(d.get("roi_trigger")) if d.get("roi_trigger") else None
+        oxy_roi     = tuple(d.get("oxy_roi")) if d.get("oxy_roi") else None  # ✅ 新增
         ROI_STREAM_URL = d.get("roi_stream_url", ROI_STREAM_URL)
         OXY_STREAM_URL = d.get("oxy_stream_url", OXY_STREAM_URL)
         ROI_USERNAME = d.get("roi_username", "")
@@ -212,7 +217,6 @@ def detect_green_to_gray(prev_img, curr_img, g_drop=5, gray_increase=10):
     trigger = (delta_g > g_drop) and (delta_gray > gray_increase)
     return trigger, float(delta_g), float(delta_gray)
 import tempfile
-
 def do_inference_on_roi_frame(frame_bgr):
     """
     在 ROI 區域進行推論，並於 App 介面下方更新辨識結果 Label。
@@ -283,7 +287,7 @@ def do_inference_on_roi_frame(frame_bgr):
         if os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
-                log("🧹 已清理暫存檔")
+                # log("🧹 已清理暫存檔")
             except Exception as e:
                 log(f"⚠️ 無法刪除暫存檔: {e}")
 
@@ -448,6 +452,8 @@ def oxy_preview_loop():
 
     log(f"🔍 嘗試開啟 OXY 串流（FFMPEG backend）: {url}")
 
+    last_oxy_value = None  # ✅ 新增：紀錄上一次 OCR 結果
+
     while True:
         try:
             # 若尚未開啟或中斷 → 重新連線
@@ -481,6 +487,11 @@ def oxy_preview_loop():
 
             reconnecting = False
 
+            # ✅ 若設定了 OXY ROI，先裁切
+            if oxy_roi:
+                x, y, w, h = oxy_roi
+                frame = frame[y:y+h, x:x+w].copy()
+
             # 顯示畫面
             pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             tkimg = to_tk(pil)
@@ -489,14 +500,29 @@ def oxy_preview_loop():
 
             # 即時 OCR
             if TESS_OK:
+                # ✅ Step 1. Convert to grayscale
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-                text = pytesseract.image_to_string(
-                    th, config="--psm 7 -c tessedit_char_whitelist=0123456789.%"
+
+                # ✅ Step 2. Basic preprocessing (threshold + denoise)
+                # 使用 OTSU 二值化去除背景雜訊
+                gray = cv2.GaussianBlur(gray, (3, 3), 0)
+                _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                # ✅ Step 3. Run OCR
+                raw_text = pytesseract.image_to_string(
+                    th,
+                    config="--psm 7 -c tessedit_char_whitelist=0123456789."
                 ).strip()
-                root.after(0, lambda val=text: oxy_value_label.config(
-                    text=f"OCR 結果：{val}" if val else "OCR 結果：—"
-                ))
+                # ✅ Step 4. Postprocess → 只保留數字與小數點
+                import re
+                match = re.findall(r"[0-9.]+", raw_text)
+                text = match[0] if match else ""
+
+                # ✅ Step 5. 僅當 OCR 結果改變時才更新顯示
+                if text and text != last_oxy_value:
+                    last_oxy_value = text
+                    root.after(0, lambda val=text: oxy_value_label.config(
+                        text=f"OCR 結果：{val}"
+                    ))
 
         except Exception as e:
             log(f"❌ OXY 串流錯誤: {e}")
@@ -677,7 +703,33 @@ def select_roi(which="main"):
         log("🟩 ROI 已顯示於預覽畫面")
     except Exception as e:
         log(f"⚠️ 無法更新預覽畫面：{e}")
+def select_oxy_roi():
+    """開啟目前 OXY 畫面讓使用者框選顯示範圍"""
+    global oxy_roi
+    log("🟦 開始選取 Oxygen ROI")
 
+    frame = get_oxy_frame()
+    if frame is None or frame.size == 0:
+        log("❌ 無法取得 OXY 畫面")
+        return
+
+    try:
+        # ✅ 移除 from_center 參數，以相容 OpenCV 4.10+
+        roi = cv2.selectROI("Select OXY ROI", frame)
+        cv2.destroyAllWindows()
+
+        if roi == (0, 0, 0, 0):
+            log("❌ 未選取任何 ROI")
+            return
+
+        oxy_roi = tuple(map(int, roi))
+        save_roi_config()
+        log(f"✅ 設定 Oxygen ROI = {oxy_roi}")
+
+    except Exception as e:
+        log(f"❌ OXY ROI 選取錯誤: {e}")
+
+# ============== Main App ==============
 def main():
     global root, left_preview, right_preview, roi1_preview, roi2_preview
     global oxy_value_label, roi_result_label, console, status_label
@@ -700,6 +752,7 @@ def main():
     roi_menu = tk.Menu(menubar, tearoff=0)
     roi_menu.add_command(label="選取 ROI Main", command=lambda: select_roi("main"))
     roi_menu.add_command(label="選取 ROI Trigger", command=lambda: select_roi("trigger"))
+    roi_menu.add_command(label="選取 OXY ROI", command=select_oxy_roi)  # ✅ 新增
     roi_menu.add_separator()
     roi_menu.add_command(label="重新載入 ROI 設定", command=load_roi_config)
     roi_menu.add_command(label="儲存 ROI 設定", command=save_roi_config)
@@ -773,8 +826,18 @@ def main():
     right_frame.columnconfigure(0, weight=1)
     right_frame.rowconfigure(2, weight=1)
 
-    oxy_box = tk.LabelFrame(right_frame, text="Oxygen Stream", fg="white", bg="#202020")
-    oxy_box.grid(row=0, column=0, sticky="ew", pady=5)
+    oxy_wrapper = tk.Frame(right_frame, bg="#202020", width=400)
+    oxy_wrapper.grid(row=0, column=0, sticky="n", pady=5)
+    oxy_wrapper.grid_propagate(False)  # ✅ 固定寬度，不讓子元件自動撐開
+    oxy_box = tk.LabelFrame(
+        oxy_wrapper,
+        text="Oxygen Stream",
+        fg="white",
+        bg="#202020"
+    )
+    oxy_box.pack(fill="both", expand=True)
+    # oxy_box = tk.LabelFrame(right_frame, text="Oxygen Stream", fg="white", bg="#202020")
+    # oxy_box.grid(row=0, column=0, sticky="ew", pady=5)
     right_preview = tk.Label(oxy_box, bg="black")
     right_preview.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
 
@@ -782,10 +845,12 @@ def main():
     oxy_value_label.grid(row=1, column=0, pady=5, sticky="ew")
 
     console_box = tk.LabelFrame(right_frame, text="Console Log", fg="white", bg="#202020")
-    console_box.grid(row=2, column=0, sticky="nsew", pady=5)
+    # console_box.grid(row=2, column=0, sticky="nsew", pady=5)
+    console_box.grid(row=2, column=0, sticky="n", pady=5)
     console_box.columnconfigure(0, weight=1)
     console_box.rowconfigure(0, weight=1)
-    console = tk.Text(console_box, font=("Consolas", 10), bg="#111", fg="white", wrap="word")
+    # console = tk.Text(console_box, font=("Consolas", 10), bg="#111", fg="white", wrap="word")
+    console = tk.Text(console_box, font=("Consolas", 10), bg="#111", fg="white", wrap="word", height=20)
     console.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
     # === Init + Start Threads ===
