@@ -52,6 +52,7 @@ recording = False
 roi_main = None
 roi_trigger = None
 oxy_roi = None
+oxy_otsu_threshold = 0  # 0 = 自動 OTSU 模式
 
 trigger_update_interval = 0.15
 trigger_delay_after_gray = 1.2
@@ -92,24 +93,27 @@ def save_roi_config():
     data = {
         "roi_main": list(roi_main) if roi_main else None,
         "roi_trigger": list(roi_trigger) if roi_trigger else None,
-        "oxy_roi": list(oxy_roi) if oxy_roi else None,  # ✅ 新增
+        "oxy_roi": list(oxy_roi) if oxy_roi else None,
+        "oxy_otsu_threshold": oxy_otsu_threshold,  # ✅ 新增
         "roi_stream_url": ROI_STREAM_URL,
         "oxy_stream_url": OXY_STREAM_URL
     }
     json.dump(data, open(ROI_FILE, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
     log("✅ ROI/Stream 設定已儲存")
 def load_roi_config():
-    global roi_main, roi_trigger, oxy_roi, ROI_STREAM_URL, OXY_STREAM_URL, ROI_USERNAME, ROI_PASSWORD
+    global roi_main, roi_trigger, oxy_roi, oxy_otsu_threshold
+    global ROI_STREAM_URL, OXY_STREAM_URL, ROI_USERNAME, ROI_PASSWORD
     if os.path.exists(ROI_FILE):
         d = json.load(open(ROI_FILE, "r", encoding="utf-8"))
         roi_main    = tuple(d.get("roi_main")) if d.get("roi_main") else None
         roi_trigger = tuple(d.get("roi_trigger")) if d.get("roi_trigger") else None
-        oxy_roi     = tuple(d.get("oxy_roi")) if d.get("oxy_roi") else None  # ✅ 新增
+        oxy_roi     = tuple(d.get("oxy_roi")) if d.get("oxy_roi") else None
+        oxy_otsu_threshold = int(d.get("oxy_otsu_threshold", 0))  # ✅ 新增
         ROI_STREAM_URL = d.get("roi_stream_url", ROI_STREAM_URL)
         OXY_STREAM_URL = d.get("oxy_stream_url", OXY_STREAM_URL)
         ROI_USERNAME = d.get("roi_username", "")
         ROI_PASSWORD = d.get("roi_password", "")
-        log(f"載入設定 | ROI URL={ROI_STREAM_URL}, 帳號={ROI_USERNAME}")
+        log(f"載入設定 | OTSU 閾值={oxy_otsu_threshold} | ROI URL={ROI_STREAM_URL}")
     else:
         ROI_USERNAME = ROI_PASSWORD = ""
         log("（尚未有 ROI/Stream 設定）")
@@ -172,10 +176,12 @@ def get_roi_frame():
         return gray_frame()
 def get_oxy_frame():
     try:
-        return read_stream(OXY_STREAM_URL)
+        frame = read_stream(OXY_STREAM_URL)
+        if frame is None or frame.size == 0:
+            return gray_frame(480, 270)
+        return frame
     except:
-        return gray_frame()
-
+        return gray_frame(480, 270)
 # ============== Visual overlays ==============
 def overlay_roi_and_badge(frame_bgr, pred_text=None, pred_conf=None):
     img = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -485,6 +491,17 @@ def oxy_preview_loop():
                 time.sleep(1)
                 continue
 
+            # ✅ 若設定了 OXY ROI，先裁切（防呆）
+            if oxy_roi and frame is not None and frame.size > 0:
+                x, y, w, h = oxy_roi
+                h_max, w_max = frame.shape[:2]
+                # 🔒 確保 ROI 在範圍內
+                x = max(0, min(x, w_max-1))
+                y = max(0, min(y, h_max-1))
+                w = min(w, w_max - x)
+                h = min(h, h_max - y)
+                frame = frame[y:y+h, x:x+w].copy()
+
             reconnecting = False
 
             # ✅ 若設定了 OXY ROI，先裁切
@@ -500,13 +517,23 @@ def oxy_preview_loop():
 
             # 即時 OCR
             if TESS_OK:
+                # ✅ 僅取 ROI 區域進行 OCR
+                if oxy_roi:
+                    x, y, w, h = oxy_roi
+                    frame = frame[y:y+h, x:x+w].copy()
+
                 # ✅ Step 1. Convert to grayscale
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-                # ✅ Step 2. Basic preprocessing (threshold + denoise)
-                # 使用 OTSU 二值化去除背景雜訊
+                # ✅ Step 2. Basic preprocessing (threshold + denoise), 使用 OTSU 二值化去除背景雜訊
                 gray = cv2.GaussianBlur(gray, (3, 3), 0)
-                _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                if oxy_otsu_threshold <= 0:
+                    # ✅ 自動 OTSU 模式
+                    _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                else:
+                    # ✅ 使用手動閾值
+                    _, th = cv2.threshold(gray, oxy_otsu_threshold, 255, cv2.THRESH_BINARY)
+                
                 # ✅ Step 3. Run OCR
                 raw_text = pytesseract.image_to_string(
                     th,
@@ -729,6 +756,119 @@ def select_oxy_roi():
     except Exception as e:
         log(f"❌ OXY ROI 選取錯誤: {e}")
 
+# ============== Debug tools ==============
+def manual_predict_once():
+        """手動觸發一次 ROI Predict（使用目前 ROI 畫面）"""
+        global roi_frame_buffer
+        if roi_frame_buffer is None or roi_frame_buffer.size == 0:
+            log("⚠️ ROI buffer 為空，請確認串流畫面是否啟動")
+            return
+        log("🧠 手動觸發一次 Predict")
+        do_inference_on_roi_frame(roi_frame_buffer.copy())
+def debug_oxy_preprocess_otsu():
+    """
+    🧪 進階版：視覺化 OXY 前處理 + OTSU 二值化效果
+    僅針對 ROI 區域顯示，可手動調整亮度、對比、飽和度、Gamma、閾值
+    """
+    global oxy_otsu_threshold
+    log("🧪 開啟 OXY Preprocess + OTSU Debug 工具")
+
+    frame = get_oxy_frame()
+    if frame is None or frame.size == 0:
+        log("❌ 無法取得 OXY 畫面")
+        return
+    
+    # ✅ 僅顯示 OXY ROI 範圍（若有設定）
+    if oxy_roi and frame.size > 0:
+        x, y, w, h = oxy_roi
+        h_max, w_max = frame.shape[:2]
+        x = max(0, min(x, w_max-1))
+        y = max(0, min(y, h_max-1))
+        w = min(w, w_max - x)
+        h = min(h, h_max - y)
+        frame = frame[y:y+h, x:x+w].copy()
+        log(f"🟦 使用 OXY ROI 區域：{oxy_roi}")
+
+    # ✅ 僅顯示 OXY ROI 範圍（若有設定）
+    if oxy_roi:
+        x, y, w, h = oxy_roi
+        frame = frame[y:y+h, x:x+w].copy()
+        log(f"🟦 使用 OXY ROI 區域：{oxy_roi}")
+    else:
+        log("⚠️ 尚未設定 OXY ROI，使用整張畫面")
+
+    win_name = "OXY Preprocess + OTSU Debug"
+    cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(win_name, 1400, 700)
+
+    # 初始參數
+    init_vals = {
+        "Brightness": 50,   # 0~100，50=原圖
+        "Contrast": 50,     # 0~100，50=原圖
+        "Gamma": 50,        # 0~100，50=1.0
+        "Saturation": 50,   # 0~100，50=原圖
+        "Threshold": oxy_otsu_threshold,  # 0=OTSU 自動
+    }
+
+    for name, val in init_vals.items():
+        cv2.createTrackbar(name, win_name, val, 100 if name != "Threshold" else 255, lambda x: None)
+
+    def update_display():
+        # --- 讀取滑桿 ---
+        b = cv2.getTrackbarPos("Brightness", win_name)
+        c = cv2.getTrackbarPos("Contrast", win_name)
+        g = cv2.getTrackbarPos("Gamma", win_name)
+        s = cv2.getTrackbarPos("Saturation", win_name)
+        t = cv2.getTrackbarPos("Threshold", win_name)
+
+        # --- 調整曝光、對比 ---
+        img = frame.copy().astype(np.float32)
+        brightness = (b - 50) * 2.5       # ±125
+        contrast = (c / 50.0)
+        img = np.clip((img - 128) * contrast + 128 + brightness, 0, 255).astype(np.uint8)
+
+        # --- 調整飽和度 ---
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
+        hsv[...,1] *= (s / 50.0)
+        hsv[...,1] = np.clip(hsv[...,1], 0, 255)
+        img = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+        # --- 灰階 + Gamma ---
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gamma = g / 50.0
+        gamma_corr = np.power(gray / 255.0, 1.0 / gamma)
+        gray = np.uint8(np.clip(gamma_corr * 255, 0, 255))
+
+        # --- 二值化 ---
+        if t == 0:
+            _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        else:
+            _, th = cv2.threshold(gray, t, 255, cv2.THRESH_BINARY)
+
+        # --- 組合畫面顯示 ---
+        merged = np.hstack([
+            cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+            cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR),
+            cv2.cvtColor(th, cv2.COLOR_GRAY2BGR)
+        ])
+        cv2.imshow(win_name, merged[:, :, ::-1])  # BGR→RGB 顯示較自然
+
+    log("📊 使用滑桿調整曝光/對比/閾值，按 S 儲存設定，ESC 離開")
+
+    while True:
+        update_display()
+        key = cv2.waitKey(50) & 0xFF
+        if key == 27:  # ESC
+            break
+        elif key == ord('s'):
+            t = cv2.getTrackbarPos("Threshold", win_name)
+            oxy_otsu_threshold = t
+            save_roi_config()
+            log(f"💾 已儲存 OTSU 閾值：{oxy_otsu_threshold}")
+
+    cv2.destroyWindow(win_name)
+    log("🧪 OTSU Debug 工具已關閉")
+
 # ============== Main App ==============
 def main():
     global root, left_preview, right_preview, roi1_preview, roi2_preview
@@ -761,17 +901,8 @@ def main():
 
     # === Debug Menu ===
     debug_menu = tk.Menu(menubar, tearoff=0)
-
-    def manual_predict_once():
-        """手動觸發一次 ROI Predict（使用目前 ROI 畫面）"""
-        global roi_frame_buffer
-        if roi_frame_buffer is None or roi_frame_buffer.size == 0:
-            log("⚠️ ROI buffer 為空，請確認串流畫面是否啟動")
-            return
-        log("🧠 手動觸發一次 Predict")
-        do_inference_on_roi_frame(roi_frame_buffer.copy())
-
     debug_menu.add_command(label="手動推送一次 Predict", command=manual_predict_once)
+    debug_menu.add_command(label="進階 OXY Preprocess + OTSU Debug", command=debug_oxy_preprocess_otsu)
     menubar.add_cascade(label="Debug 工具", menu=debug_menu)
 
     # === Status bar ===
