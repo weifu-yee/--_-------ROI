@@ -21,7 +21,11 @@ except Exception:
 TESS_OK = False
 try:
     import pytesseract
-except Exception:
+    pytesseract.pytesseract.tesseract_cmd = r"C:/Users/user/AppData/Local/Programs/Tesseract-OCR/tesseract.exe"
+    print("✅ pytesseract version:", pytesseract.get_tesseract_version())
+    TESS_OK = True
+except Exception as e:
+    print("❌ pytesseract import failed:", e)
     TESS_OK = False
 
 # ============== Paths & assets ==============
@@ -778,143 +782,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# ========================== GUI 建構區 ==========================
-# root = tk.Tk()
-# root.title("Smart ROI Monitor v11 (Auto Layout + Resizable)")
-# root.geometry("1200x850")
-# root.configure(bg="#202020")
-
-# # ===== 全域伸展設定 =====
-# root.rowconfigure(1, weight=1)
-# root.columnconfigure(0, weight=1)
-
-# # === 上方選單 ===
-# menubar = tk.Menu(root)
-# macro_menu = tk.Menu(menubar, tearoff=0)
-# macro_menu.add_command(label="錄製巨集", command=record_main_macro)
-# macro_menu.add_command(label="播放巨集", command=play_main_macro)
-# macro_menu.add_command(label="停止巨集", command=stop_macro_play)
-# macro_menu.add_separator()
-# macro_menu.add_command(label="設定播放間隔", command=set_macro_delay)
-# menubar.add_cascade(label="巨集", menu=macro_menu)
-
-# roi_menu = tk.Menu(menubar, tearoff=0)
-# roi_menu.add_command(label="選取 ROI Main", command=lambda: select_roi("main"))
-# roi_menu.add_command(label="選取 ROI Trigger", command=lambda: select_roi("trigger"))
-# roi_menu.add_separator()
-# roi_menu.add_command(label="重新載入 ROI 設定", command=load_roi_config)
-# roi_menu.add_command(label="儲存 ROI 設定", command=save_roi_config)
-# menubar.add_cascade(label="ROI 設定", menu=roi_menu)
-# root.config(menu=menubar)
-
-# # === 狀態列 ===
-# status_frame = tk.Frame(root, bg="#202020")
-# status_frame.grid(row=0, column=0, sticky="ew", pady=5)
-# status_label = tk.Label(status_frame, text="🔴 Idle", fg="red", bg="#202020", font=("Arial", 14, "bold"))
-# status_label.pack(side="left", padx=10)
-# tk.Button(status_frame, text="▶ 開始執行", bg="#3cb371", command=start_all).pack(side="left", padx=5)
-# tk.Button(status_frame, text="⏹ 結束執行", bg="#ff6347", command=stop_all).pack(side="left", padx=5)
-
-# # === 主框架 ===
-# main_frame = tk.Frame(root, bg="#202020")
-# main_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
-# main_frame.columnconfigure(0, weight=1)
-# main_frame.columnconfigure(1, weight=1)
-# main_frame.rowconfigure(0, weight=1)
-
-# # ================= 左側 ROI 區 =================
-# left_frame = tk.Frame(main_frame, bg="#202020")
-# left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-# left_frame.rowconfigure(2, weight=1)
-# left_frame.columnconfigure(0, weight=1)
-
-# # ROI 主畫面
-# roi_box = tk.LabelFrame(left_frame, text="ROI Stream", fg="white", bg="#202020")
-# roi_box.grid(row=0, column=0, sticky="nsew", pady=5)
-# roi_box.rowconfigure(0, weight=1)
-# roi_box.columnconfigure(0, weight=1)
-# left_preview = tk.Label(roi_box, bg="black")
-# left_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-
-# # 辨識結果
-# roi_result_label = tk.Label(left_frame, text="辨識結果：—", fg="cyan", bg="#202020", font=("Consolas", 12))
-# roi_result_label.grid(row=1, column=0, pady=5)
-
-# # ROI 小預覽列
-# roi_subframe = tk.Frame(left_frame, bg="#202020")
-# roi_subframe.grid(row=2, column=0, sticky="nsew", pady=5)
-# roi_subframe.columnconfigure(0, weight=1)
-# roi_subframe.columnconfigure(1, weight=1)
-
-# roi2_box = tk.LabelFrame(roi_subframe, text="ROI2 Trigger", fg="white", bg="#202020")
-# roi2_box.grid(row=0, column=0, sticky="nsew", padx=4)
-# roi2_box.rowconfigure(0, weight=1)
-# roi2_box.columnconfigure(0, weight=1)
-# roi2_preview = tk.Label(roi2_box, bg="black")
-# roi2_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-
-# roi1_box = tk.LabelFrame(roi_subframe, text="ROI1 Predict", fg="white", bg="#202020")
-# roi1_box.grid(row=0, column=1, sticky="nsew", padx=4)
-# roi1_box.rowconfigure(0, weight=1)
-# roi1_box.columnconfigure(0, weight=1)
-# roi1_preview = tk.Label(roi1_box, bg="black")
-# roi1_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-
-# # ================= 右側 Oxygen + Log =================
-# right_frame = tk.Frame(main_frame, bg="#202020")
-# right_frame.grid(row=0, column=1, sticky="nsew")
-# right_frame.columnconfigure(0, weight=1)
-# right_frame.rowconfigure(2, weight=1)
-
-# oxy_box = tk.LabelFrame(right_frame, text="Oxygen Stream", fg="white", bg="#202020")
-# oxy_box.grid(row=0, column=0, sticky="ew", pady=5)
-# oxy_box.columnconfigure(0, weight=1)
-# right_preview = tk.Label(oxy_box, bg="black")
-# right_preview.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
-
-# oxy_value_label = tk.Label(right_frame, text="OCR 結果：—", fg="lime", bg="#202020", font=("Consolas", 12))
-# oxy_value_label.grid(row=1, column=0, pady=5, sticky="ew")
-
-# console_box = tk.LabelFrame(right_frame, text="Console Log", fg="white", bg="#202020")
-# console_box.grid(row=2, column=0, sticky="nsew", pady=5)
-# console_box.columnconfigure(0, weight=1)
-# console_box.rowconfigure(0, weight=1)
-
-# console = tk.Text(console_box, font=("Consolas", 10), bg="#111", fg="white", wrap="word")
-# console.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-
-# # === 初始化灰底畫面 ===
-# def init_gray_preview():
-#     g1 = to_tk(Image.fromarray(gray_frame(480, 270)))
-#     g2 = to_tk(Image.fromarray(gray_frame(480, 100)))
-#     left_preview.configure(image=g1); left_preview.image = g1
-#     right_preview.configure(image=g2); right_preview.image = g2
-#     log("🩶 初始灰底畫面已載入")
-
-# # ===== 啟動區 =====
-# load_roi_config()
-# init_gray_preview()
-
-# try:
-#     pil = overlay_roi_and_badge(roi_frame_buffer, last_predict_text, last_predict_conf)
-#     tkimg = to_tk(pil)
-#     left_preview.configure(image=tkimg)
-#     left_preview.image = tkimg
-#     log("🟩 已載入並顯示 ROI 疊圖（初始化）")
-# except Exception as e:
-#     log(f"⚠️ 初始化 ROI 疊圖失敗：{e}")
-
-# # 啟動兩個獨立串流執行緒（不同 backend）
-# threading.Thread(target=roi_preview_loop, daemon=True).start()
-# threading.Thread(target=oxy_preview_loop, daemon=True).start()
-# log("📡 ROI & OXY 串流執行中")
-
-# if not ROBOWFLOW_ENABLED:
-#     log("⚠ Roboflow 未啟用，將以 mock good 模式運行（不會觸發停止）")
-# if not TESS_OK:
-#     log("⚠ 未安裝 pytesseract（OCR 無法運作）")
-
-# root.mainloop()
-
