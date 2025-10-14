@@ -53,6 +53,8 @@ roi_main = None
 roi_trigger = None
 oxy_roi = None
 
+_main_stop_event = threading.Event()  # 🛑 主程序 ESC 停止事件
+
 # === OXY 前處理參數 ===
 oxy_otsu_threshold = 0  # 0 = 自動 OTSU 模式
 oxy_brightness = 50   # 0~100, 50 = 原圖
@@ -351,7 +353,7 @@ def handle_emergency(source="ROI_BAD"):
     stop_all_monitoring(silent=True)
     show_alert(f"⚠️ 異常：{source}")
 
-# ============== Monitor threads ==============
+# ============== ROI Monitor & Preview Loops ==============
 def roi_monitor_loop():
     """🔶 專職 ROI 觸發監測與推論（不更新畫面）"""
     prev_trig = None
@@ -381,27 +383,6 @@ def roi_monitor_loop():
             prev_trig = trig
 
         time.sleep(trigger_update_interval)
-def oxy_monitor_loop():
-    while monitoring:
-        frame = get_oxy_frame()
-        text = ""
-        if TESS_OK:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
-            text = pytesseract.image_to_string(th, config="--psm 7 -c tessedit_char_whitelist=0123456789.%").strip()
-        pil = overlay_oxy(frame, text, True)
-        tkimg = to_tk(pil, size=(480,270))
-
-        # ❌ 原本會閃爍或崩潰
-        # right_preview.configure(image=tkimg); right_preview.image = tkimg
-
-        # ✅ 改成這樣
-        root.after(0, lambda img=tkimg: right_preview.configure(image=img))
-        root.after(0, lambda img=tkimg: setattr(right_preview, "image", img))
-        
-        time.sleep(0.1)
-
-# ================ Preview Loops ==============
 def roi_preview_loop():
     """🖼 專職 ROI 畫面顯示更新（FFmpeg + thread-safe GUI 更新）"""
     global roi_frame_buffer
@@ -461,16 +442,19 @@ def roi_preview_loop():
             log(f"⚠️ ROI 預覽錯誤：{e}")
             cap = None
             time.sleep(1)
+
+# ================= OXY 分工版 =================
+
+# 🔹 OXY 畫面緩衝區（共享）
+oxy_frame_buffer = gray_frame(480, 100)
 def oxy_preview_loop():
-    """OXY 畫面預覽（MJPEG HTTP 串流，使用 FFMPEG backend）"""
-    global OXY_STREAM_URL, oxy_roi
+    """🖼 OXY 畫面預覽（只負責顯示，不做 OCR）"""
+    global oxy_frame_buffer, OXY_STREAM_URL, oxy_roi
     url = OXY_STREAM_URL
     cap = None
     reconnecting = False
 
-    log(f"🔍 嘗試開啟 OXY 串流（FFMPEG backend）: {url}")
-
-    last_oxy_value = None  # ✅ 記錄上一次 OCR 結果
+    log(f"📡 啟動 OXY 預覽（FFMPEG backend）: {url}")
 
     while True:
         try:
@@ -487,7 +471,6 @@ def oxy_preview_loop():
                     root.after(0, lambda img=tkimg: right_preview.configure(image=img))
                     root.after(0, lambda img=tkimg: setattr(right_preview, "image", img))
 
-                # ✅ 嘗試重新建立串流
                 cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 cap.set(cv2.CAP_PROP_FPS, 30)
@@ -503,6 +486,8 @@ def oxy_preview_loop():
                 time.sleep(1)
                 continue
 
+            reconnecting = False
+
             # === ROI 裁切（防呆）===
             if oxy_roi and frame is not None and frame.size > 0:
                 x, y, w, h = oxy_roi
@@ -513,64 +498,75 @@ def oxy_preview_loop():
                 h = min(h, h_max - y)
                 frame = frame[y:y+h, x:x+w].copy()
 
-            reconnecting = False
+            # === 更新共享 buffer ===
+            oxy_frame_buffer = frame.copy()
 
-            # === 顯示目前畫面 ===
-            if frame is not None and frame.size > 0:
-                pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                tkimg = to_tk(pil)
-                root.after(0, lambda img=tkimg: right_preview.configure(image=img))
-                root.after(0, lambda img=tkimg: setattr(right_preview, "image", img))
-            else:
-                continue
+            # === 顯示畫面（thread-safe）===
+            pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            tkimg = to_tk(pil)
+            root.after(0, lambda img=tkimg: right_preview.configure(image=img))
+            root.after(0, lambda img=tkimg: setattr(right_preview, "image", img))
 
-            # === OCR 前處理與辨識 ===
-            if TESS_OK and frame is not None and frame.size > 0:
-                img = frame.copy().astype(np.float32)
-
-                # 亮度 / 對比
-                brightness = (oxy_brightness - 50) * 2.5
-                contrast = (oxy_contrast / 50.0)
-                img = np.clip((img - 128) * contrast + 128 + brightness, 0, 255).astype(np.uint8)
-
-                # 飽和度
-                hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
-                hsv[..., 1] *= (oxy_saturation / 50.0)
-                hsv[..., 1] = np.clip(hsv[..., 1], 0, 255)
-                img = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-
-                # 灰階 + Gamma
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                gamma = oxy_gamma / 50.0
-                gray = np.uint8(np.clip(np.power(gray / 255.0, 1.0 / gamma) * 255, 0, 255))
-
-                # OTSU / 手動閾值
-                if oxy_otsu_threshold <= 0:
-                    _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                else:
-                    _, th = cv2.threshold(gray, oxy_otsu_threshold, 255, cv2.THRESH_BINARY)
-
-                # OCR
-                raw_text = pytesseract.image_to_string(
-                    th,
-                    config="--psm 7 -c tessedit_char_whitelist=0123456789."
-                ).strip()
-                match = re.findall(r"[0-9.]+", raw_text)
-                text = match[0] if match else ""
-
-                # 僅當結果變化時更新顯示
-                if text and text != last_oxy_value:
-                    last_oxy_value = text
-                    root.after(0, lambda val=text: oxy_value_label.config(
-                        text=f"OCR 結果：{val}"
-                    ))
+            time.sleep(0.05)
 
         except Exception as e:
-            log(f"❌ OXY 串流錯誤: {e}")
+            log(f"❌ OXY 預覽錯誤: {e}")
             if cap:
                 cap.release()
             cap = None
             time.sleep(1)
+def oxy_monitor_loop():
+    """🧠 OXY 背景 OCR 偵測（僅文字分析，不更新 GUI 畫面）"""
+    global oxy_frame_buffer
+    last_oxy_value = None
+
+    log("🧠 OXY 偵測執行中")
+
+    while monitoring:
+        try:
+            frame = oxy_frame_buffer.copy()
+            if frame is None or frame.size == 0:
+                time.sleep(0.2)
+                continue
+
+            # === 前處理 ===
+            img = frame.astype(np.float32)
+            brightness = (oxy_brightness - 50) * 2.5
+            contrast = (oxy_contrast / 50.0)
+            img = np.clip((img - 128) * contrast + 128 + brightness, 0, 255).astype(np.uint8)
+
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
+            hsv[..., 1] *= (oxy_saturation / 50.0)
+            hsv[..., 1] = np.clip(hsv[..., 1], 0, 255)
+            img = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            gamma = oxy_gamma / 50.0
+            gray = np.uint8(np.clip(np.power(gray / 255.0, 1.0 / gamma) * 255, 0, 255))
+
+            if oxy_otsu_threshold <= 0:
+                _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            else:
+                _, th = cv2.threshold(gray, oxy_otsu_threshold, 255, cv2.THRESH_BINARY)
+
+            # === OCR 辨識 ===
+            raw_text = pytesseract.image_to_string(
+                th, config="--psm 7 -c tessedit_char_whitelist=0123456789."
+            ).strip()
+            match = re.findall(r"[0-9.]+", raw_text)
+            text = match[0] if match else ""
+
+            # === 僅當結果改變才更新 Label ===
+            if text and text != last_oxy_value:
+                last_oxy_value = text
+                root.after(0, lambda val=text: oxy_value_label.config(
+                    text=f"OCR 結果：{val}"
+                ))
+
+        except Exception as e:
+            log(f"⚠️ OXY OCR 錯誤: {e}")
+
+        time.sleep(0.3)
 
 # ============== Macro (Enhanced Loop + Scroll Support + ESC Safety) ==============
 import ctypes
@@ -656,18 +652,18 @@ def record_main_macro():
 
     threading.Thread(target=_record_thread, daemon=True).start()
 
-def _esc_safety_listener():
-    """監聽 ESC 鍵，作為保險開關停止巨集。"""
-    from pynput import keyboard
-    def on_press(key):
-        if key == keyboard.Key.esc:
-            stop_macro_play()
-            return False
-    try:
-        with keyboard.Listener(on_press=on_press) as listener:
-            listener.join()
-    except Exception:
-        pass
+# def _esc_safety_listener():
+#     """監聽 ESC 鍵，作為保險開關停止巨集。"""
+#     from pynput import keyboard
+#     def on_press(key):
+#         if key == keyboard.Key.esc:
+#             stop_macro_play()
+#             return False
+#     try:
+#         with keyboard.Listener(on_press=on_press) as listener:
+#             listener.join()
+#     except Exception:
+#         pass
 
 def play_main_macro():
     """無限循環播放巨集，按 ESC 停止。"""
@@ -706,7 +702,7 @@ def play_main_macro():
             try:
                 log(f"▶ 無限播放巨集，間隔 {macro_loop_delay:.1f} 秒")
                 # 啟動安全監聽 ESC
-                threading.Thread(target=_esc_safety_listener, daemon=True).start()
+                threading.Thread(target=_esc_safety_main_listener, daemon=True).start()
 
                 while not _macro_stop_event.is_set():
                     t0 = time.time()
@@ -795,19 +791,41 @@ def start_all():
     if monitoring:
         return
     monitoring = True
+    _main_stop_event.clear()
     set_status(True)
+
+    # 狀態提示顯示 ESC 停止說明
+    try:
+        status_label.config(text="🔵 主程序執行中（按 ESC 停止）", fg="cyan")
+    except Exception:
+        pass
+
+    # 啟動 ESC 安全監聽
+    threading.Thread(target=_esc_safety_main_listener, daemon=True).start()
+
     # --- 分開職責 ---
     threading.Thread(target=roi_preview_loop, daemon=True).start()
     threading.Thread(target=roi_monitor_loop, daemon=True).start()
+    threading.Thread(target=oxy_preview_loop, daemon=True).start()
     threading.Thread(target=oxy_monitor_loop, daemon=True).start()
     play_main_macro()
-    log("✅ 開始執行（Preview + Monitor + OXY + Macro）")
+
+    log("✅ 開始執行（ROI + OXY 分工完成）")
 def stop_all_monitoring(silent=False):
     global monitoring
     monitoring = False; set_status(False)
     if not silent: log("🟥 停止監測")
 def stop_all():
-    stop_macro_play(); stop_all_monitoring(); close_alert()
+    global _main_stop_event
+    stop_macro_play()
+    stop_all_monitoring()
+    close_alert()
+    _main_stop_event.set()
+    try:
+        status_label.config(text="🔴 Idle", fg="red")
+    except Exception:
+        pass
+    log("🟥 主程序已結束（含巨集與監測）")
 def select_roi(which="main"):
     """開啟目前 ROI buffer 讓使用者框選 ROI"""
     global roi_frame_buffer, roi_main, roi_trigger
@@ -874,6 +892,32 @@ def select_oxy_roi():
 
     except Exception as e:
         log(f"❌ OXY ROI 選取錯誤: {e}")
+
+# ============== ESC 監聽 ==============
+def _esc_safety_main_listener():
+    """統一 ESC 鍵監聽：僅啟動一次，用於停止主程序與巨集。"""
+    from pynput import keyboard
+    global _esc_listener_started
+
+    # 若已有 listener 在跑，就直接返回避免重複監聽
+    if getattr(_esc_safety_main_listener, "_running", False):
+        return
+    _esc_safety_main_listener._running = True
+
+    def on_press(key):
+        if key == keyboard.Key.esc:
+            log("🛑 按下 ESC — 停止所有程序（主程序 + 巨集）")
+            stop_all()
+            _main_stop_event.set()
+            # 監聽完畢後清除旗標
+            _esc_safety_main_listener._running = False
+            return False
+
+    try:
+        with keyboard.Listener(on_press=on_press) as listener:
+            listener.join()
+    except Exception:
+        _esc_safety_main_listener._running = False
 
 # ============== Debug tools ==============
 def manual_predict_once():
