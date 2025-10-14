@@ -211,6 +211,8 @@ def detect_green_to_gray(prev_img, curr_img, g_drop=5, gray_increase=10):
     delta_gray = curr_gray - prev_gray
     trigger = (delta_g > g_drop) and (delta_gray > gray_increase)
     return trigger, float(delta_g), float(delta_gray)
+import tempfile
+
 def do_inference_on_roi_frame(frame_bgr):
     """
     在 ROI 區域進行推論，並於 App 介面下方更新辨識結果 Label。
@@ -224,34 +226,45 @@ def do_inference_on_roi_frame(frame_bgr):
 
     x, y, w, h = roi_main
     crop = frame_bgr[y:y+h, x:x+w].copy()
-    tmp = os.path.join(ASSETS_DIR, "_tmp_roi.jpg")
 
+    # ✅ 建立臨時英文安全路徑
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".jpg", prefix="roi_tmp_", dir=None)
+    os.close(tmp_fd)  # 關閉檔案描述符，讓 cv2 可寫入
     try:
-        cv2.imwrite(tmp, crop)
+        ok = cv2.imwrite(tmp_path, crop)
+        if not ok:
+            log(f"❌ 無法寫入暫存圖檔: {tmp_path}")
+            return None, None
+
         if ROBOWFLOW_ENABLED:
             try:
+                # ✅ Roboflow 只接受「檔案路徑」或 URL
                 result = client.run_workflow(
                     workspace_name=WORKSPACE,
                     workflow_id=WORKFLOW_ID,
-                    images={"image": tmp},
+                    images={"image": tmp_path},
                     use_cache=True
                 )
+
                 pred_class = result[0]["predictions"]["top"]
                 conf = float(result[0]["predictions"]["confidence"])
                 last_predict_text, last_predict_conf = pred_class, conf
                 log(f"[ROI] Prediction: {pred_class} ({conf:.3f})")
 
-                # ✅ 更新 ROI 結果顯示在 App 介面
-                try:
-                    color = "lime" if pred_class.lower() == "good" else "orange"
-                    roi_result_label.config(
-                        text=f"辨識結果：{pred_class} ({conf:.2f})",
-                        fg=color
-                    )
-                except Exception:
-                    pass
+                # 更新顯示結果
+                color = "lime" if pred_class.lower() == "good" else "orange"
+                roi_result_label.config(
+                    text=f"辨識結果：{pred_class} ({conf:.2f})",
+                    fg=color
+                )
 
-                # 若非 good 觸發異常處理
+                # 成功推論後才更新 ROI1 預覽畫面
+                roi_crop = crop.copy()
+                tkroi = to_tk(Image.fromarray(cv2.cvtColor(roi_crop, cv2.COLOR_BGR2RGB)), size=(360, 200))
+                root.after(0, lambda img=tkroi: roi1_preview.configure(image=img))
+                root.after(0, lambda img=tkroi: setattr(roi1_preview, "image", img))
+
+                # 若非 good 則觸發警示
                 if pred_class.lower() != "good":
                     handle_emergency("ROI_BAD")
 
@@ -261,14 +274,18 @@ def do_inference_on_roi_frame(frame_bgr):
                 log(f"❌ Inference error: {e}")
 
         else:
-            # Mock 模式
             last_predict_text, last_predict_conf = "mock_good", 0.99
             roi_result_label.config(text="辨識結果：mock_good (0.99)", fg="lime")
             return "good", 0.99
 
     finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+        # ✅ 刪除臨時檔案
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+                log("🧹 已清理暫存檔")
+            except Exception as e:
+                log(f"⚠️ 無法刪除暫存檔: {e}")
 
     return None, None
 
@@ -402,12 +419,12 @@ def roi_preview_loop():
 
             # 小區域 ROI1 / ROI2 預覽
             try:
-                if roi_main:
-                    x, y, w, h = roi_main
-                    roi_crop = frame[y:y+h, x:x+w]
-                    tkroi = to_tk(Image.fromarray(cv2.cvtColor(roi_crop, cv2.COLOR_BGR2RGB)), size=(360, 200))
-                    root.after(0, lambda img=tkroi: roi1_preview.configure(image=img))
-                    root.after(0, lambda img=tkroi: setattr(roi1_preview, "image", img))
+                # if roi_main:
+                #     x, y, w, h = roi_main
+                #     roi_crop = frame[y:y+h, x:x+w]
+                #     tkroi = to_tk(Image.fromarray(cv2.cvtColor(roi_crop, cv2.COLOR_BGR2RGB)), size=(360, 200))
+                #     root.after(0, lambda img=tkroi: roi1_preview.configure(image=img))
+                #     root.after(0, lambda img=tkroi: setattr(roi1_preview, "image", img))
 
                 if roi_trigger:
                     x, y, w, h = roi_trigger
@@ -688,6 +705,21 @@ def main():
     roi_menu.add_command(label="儲存 ROI 設定", command=save_roi_config)
     menubar.add_cascade(label="ROI 設定", menu=roi_menu)
     root.config(menu=menubar)
+
+    # === Debug Menu ===
+    debug_menu = tk.Menu(menubar, tearoff=0)
+
+    def manual_predict_once():
+        """手動觸發一次 ROI Predict（使用目前 ROI 畫面）"""
+        global roi_frame_buffer
+        if roi_frame_buffer is None or roi_frame_buffer.size == 0:
+            log("⚠️ ROI buffer 為空，請確認串流畫面是否啟動")
+            return
+        log("🧠 手動觸發一次 Predict")
+        do_inference_on_roi_frame(roi_frame_buffer.copy())
+
+    debug_menu.add_command(label="手動推送一次 Predict", command=manual_predict_once)
+    menubar.add_cascade(label="Debug 工具", menu=debug_menu)
 
     # === Status bar ===
     status_frame = tk.Frame(root, bg="#202020")
