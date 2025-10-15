@@ -1,6 +1,6 @@
 import os, json, threading, time, re
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 import cv2
 import numpy as np
 from PIL import Image, ImageTk, ImageDraw, ImageFont
@@ -344,7 +344,7 @@ def show_alert(msg="⚠️ 異常偵測"):
         lbl.image = tkimg
         lbl.pack(fill="both", expand=True)
     else:
-        tk.Label(alert_win, text=msg, fg="red", bg="black", font=("Arial", 80, "bold")).pack(expand=True)
+        tk.Label(alert_win, text=msg, fg="red", bg="black", font=("Microsoft JhengHei", 80, "bold")).pack(expand=True)
     alert_win.bind("<Button-1>", lambda e: close_alert())
 def close_alert():
     global alert_win, pause_for_alert
@@ -719,6 +719,90 @@ def record_main_macro():
         log("✅ 錄製完成，已儲存巨集事件")
 
     threading.Thread(target=_record_thread, daemon=True).start()
+def play_main_macro_once():
+    """播放巨集一次（支援 ESC 停止）"""
+    global _macro_thread
+
+    with _macro_lock:
+        if _macro_thread and _macro_thread.is_alive():
+            log("ℹ️ 巨集已在播放中，忽略本次啟動請求")
+            return
+
+        if not os.path.exists(MACRO_FILE):
+            messagebox.showwarning("提示", "沒有可播放的巨集。")
+            return
+
+        try:
+            import pyautogui
+        except Exception as e:
+            log(f"❌ 缺少 pyautogui，無法播放巨集：{e}")
+            return
+
+        try:
+            with open(MACRO_FILE, "r", encoding="utf-8") as f:
+                events = json.load(f)
+        except Exception as e:
+            log(f"❌ 讀取巨集檔失敗：{e}")
+            return
+
+        _macro_stop_event.clear()
+        set_status(True)
+        try:
+            status_label.config(text="🔵 巨集執行一次中（按 ESC 停止）", fg="cyan")
+        except Exception:
+            pass
+
+        def _run_once():
+            try:
+                log("▶ 播放巨集一次")
+                threading.Thread(target=_esc_safety_main_listener, daemon=True).start()
+
+                t0 = time.time()
+                for e in events:
+                    if _macro_stop_event.is_set():
+                        break
+
+                    delay = e.get("t", 0) - (time.time() - t0)
+                    if delay > 0:
+                        waited = 0.0
+                        while waited < delay and not _macro_stop_event.is_set():
+                            time.sleep(min(0.01, delay - waited))
+                            waited += 0.01
+                        if _macro_stop_event.is_set():
+                            break
+
+                    etype = e.get("type")
+                    try:
+                        if etype == "click":
+                            x, y = int(e.get("x", 0)), int(e.get("y", 0))
+                            pressed = bool(e.get("pressed", True))
+                            if pressed:
+                                pyautogui.mouseDown(x, y)
+                            else:
+                                pyautogui.mouseUp(x, y)
+
+                        elif etype == "scroll":
+                            dy = int(e.get("dy", 0))
+                            pyautogui.scroll(int(dy * SCROLL_SCALE))
+
+                        elif etype == "key":
+                            key_raw = e.get("key", "")
+                            key_name, is_text = _normalize_key_name(key_raw)
+                            if not key_name:
+                                continue
+                            if is_text:
+                                pyautogui.typewrite(key_name)
+                            else:
+                                pyautogui.press(key_name)
+
+                    except Exception as ie:
+                        log(f"⚠️ 巨集事件執行失敗：{ie}")
+
+            finally:
+                stop_macro_play(force=True)
+
+        _macro_thread = threading.Thread(target=_run_once, daemon=True, name="macro_once_player")
+        _macro_thread.start()
 def play_main_macro():
     """無限循環播放巨集，按 ESC 停止。"""
     global _macro_thread
@@ -1137,14 +1221,15 @@ def main():
 
     root = tk.Tk()
     root.title("Smart ROI Monitor v13 (RTSP + OXY MJPEG)")
-    root.geometry("1200x850")
+    root.geometry("1200x750")
     root.configure(bg="#202020")
 
     # === Menu ===
     menubar = tk.Menu(root)
     macro_menu = tk.Menu(menubar, tearoff=0)
     macro_menu.add_command(label="錄製巨集", command=record_main_macro)
-    macro_menu.add_command(label="播放巨集", command=play_main_macro)
+    macro_menu.add_command(label="播放巨集（單次）", command=play_main_macro_once)
+    macro_menu.add_command(label="播放巨集（重複）", command=play_main_macro)
     macro_menu.add_command(label="停止巨集", command=stop_macro_play)
     macro_menu.add_separator()
     macro_menu.add_command(label="設定播放間隔", command=set_macro_delay)
@@ -1172,22 +1257,22 @@ def main():
     # === Status bar ===
     status_frame = tk.Frame(root, bg="#202020")
     status_frame.grid(row=0, column=0, sticky="ew", pady=5)
-    status_label = tk.Label(status_frame, text="🔴 Idle", fg="red", bg="#202020", font=("Arial", 14, "bold"))
+    status_label = tk.Label(status_frame, text="🔴 Idle", fg="red", bg="#202020", font=("Microsoft JhengHei", 20, "bold"))
     status_label.pack(side="left", padx=10)
-    tk.Button(status_frame, text="▶ 開始執行", bg="#3cb371", command=start_all).pack(side="left", padx=5)
-    tk.Button(status_frame, text="⏹ 結束執行", bg="#ff6347", command=stop_all).pack(side="left", padx=5)
+    tk.Button(status_frame, text="▶ 開始執行", bg="#3cb371", command=start_all, font=("Microsoft JhengHei", 20, "bold"), width=10, height=1).pack(side="left", padx=5)
+    tk.Button(status_frame, text="⏹ 結束執行", bg="#ff6347", command=stop_all, font=("Microsoft JhengHei", 20, "bold"), width=10, height=1).pack(side="left", padx=5)
 
     # === 安全狀態區 (Safety State) ===
-    safety_frame = tk.Frame(status_frame, bg="#202020")
-    safety_frame.pack(side="right", padx=10)
+    safety_frame = tk.Frame(status_frame, bg="#919191", padx=10, pady=10)
+    safety_frame.pack(side="right", padx=0, pady=0)
 
-    safety_bad_label = tk.Label(safety_frame, text="⚠ BAD狀態: 🟢", fg="lime", bg="#202020", font=("Consolas", 10, "bold"))
+    safety_bad_label = tk.Label(safety_frame, text="⚠ BAD狀態: 🟢", fg="lime", bg="#202020", font=("Microsoft JhengHei", 16, "bold"))
     safety_bad_label.pack(side="left", padx=5)
 
-    safety_oxy_label = tk.Label(safety_frame, text=f"🫁 OXY安全閾值({oxy_threshold}): 🟢", fg="lime", bg="#202020", font=("Consolas", 10, "bold"))
+    safety_oxy_label = tk.Label(safety_frame, text=f"🫁 OXY安全閾值({oxy_threshold}): 🟢", fg="lime", bg="#202020", font=("Microsoft JhengHei", 16, "bold"))
     safety_oxy_label.pack(side="left", padx=5)
 
-    tk.Button(safety_frame, text="✅ 恢復運行", command=reset_safety_conditions, bg="#444", fg="white").pack(side="left", padx=8)
+    tk.Button(safety_frame, text="✅ 恢復運行", command=reset_safety_conditions, bg="#444", fg="white", font=("Microsoft JhengHei", 12, "bold"), width=12, height=1).pack(side="left", padx=8)
 
 
     # === Main layout ===
@@ -1205,12 +1290,12 @@ def main():
     left_frame.columnconfigure(0, weight=2)
     left_frame.rowconfigure(2, weight=1)
 
-    roi_box = tk.LabelFrame(left_frame, text="粉床 Stream", fg="white", bg="#202020")
+    roi_box = tk.LabelFrame(left_frame, text="粉床 Stream", fg="white", bg="#202020", font=("Microsoft JhengHei", 12, "bold"))
     roi_box.grid(row=0, column=0, sticky="nsew", pady=5)
     left_preview = tk.Label(roi_box, bg="black")
     left_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
 
-    roi_result_label = tk.Label(left_frame, text="辨識結果：—", fg="cyan", bg="#202020", font=("Consolas", 12))
+    roi_result_label = tk.Label(left_frame, text="辨識結果：—", fg="cyan", bg="#202020", font=("Microsoft JhengHei", 20))
     roi_result_label.grid(row=1, column=0, pady=5)
 
     roi_subframe = tk.Frame(left_frame, bg="#202020")
@@ -1218,12 +1303,12 @@ def main():
     roi_subframe.columnconfigure(0, weight=1)
     roi_subframe.columnconfigure(1, weight=1)
 
-    powder_bed_roi_box = tk.LabelFrame(roi_subframe, text="粉床 ROI Predict", fg="white", bg="#202020")
+    powder_bed_roi_box = tk.LabelFrame(roi_subframe, text="粉床 ROI Predict", fg="white", bg="#202020", font=("Microsoft JhengHei", 12, "bold"))
     powder_bed_roi_box.grid(row=0, column=0, sticky="nsew", padx=4)
     powder_bed_roi_preview = tk.Label(powder_bed_roi_box, bg="black")
     powder_bed_roi_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
 
-    trigger_roi_box = tk.LabelFrame(roi_subframe, text="螢幕監聽 ROI", fg="white", bg="#202020")
+    trigger_roi_box = tk.LabelFrame(roi_subframe, text="螢幕監聽 ROI", fg="white", bg="#202020", font=("Microsoft JhengHei", 12, "bold"))
     trigger_roi_box.grid(row=0, column=1, sticky="nsew", padx=4)
     trigger_roi_preview = tk.Label(trigger_roi_box, bg="black")
     trigger_roi_preview.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
@@ -1241,22 +1326,21 @@ def main():
         oxy_wrapper,
         text="氧氣 Stream",
         fg="white",
-        bg="#202020"
+        bg="#202020",
+        font=("Microsoft JhengHei", 12, "bold")
     )
     oxy_box.pack(fill="both", expand=True)
     right_preview = tk.Label(oxy_box, bg="black")
     right_preview.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
 
-    oxy_value_label = tk.Label(right_frame, text="OCR 結果：—", fg="lime", bg="#202020", font=("Consolas", 12))
+    oxy_value_label = tk.Label(right_frame, text="OCR 結果：—", fg="lime", bg="#202020", font=("Microsoft JhengHei", 20))
     oxy_value_label.grid(row=1, column=0, pady=5, sticky="ew")
 
-    console_box = tk.LabelFrame(right_frame, text="Console Log", fg="white", bg="#202020")
-    # console_box.grid(row=2, column=0, sticky="nsew", pady=5)
+    console_box = tk.LabelFrame(right_frame, text="Console Log", fg="white", bg="#202020", font=("Microsoft JhengHei", 12, "bold"))
     console_box.grid(row=2, column=0, sticky="n", pady=5)
     console_box.columnconfigure(0, weight=1)
     console_box.rowconfigure(0, weight=1)
-    # console = tk.Text(console_box, font=("Consolas", 10), bg="#111", fg="white", wrap="word")
-    console = tk.Text(console_box, font=("Consolas", 10), bg="#111", fg="white", wrap="word", height=20)
+    console = tk.Text(console_box, font=("Microsoft JhengHei", 12), bg="#111", fg="white", wrap="word", height=20)
     console.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
     # === Init + Start Threads ===
