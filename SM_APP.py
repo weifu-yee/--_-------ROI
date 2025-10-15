@@ -1214,6 +1214,87 @@ def reset_safety_conditions():
     debug_cond_bad = False
     debug_cond_high_oxy = False
     log("✅ 使用者確認問題已排除，安全狀態已恢復正常")
+
+# ============== Test: Screen ROI Watch (Green -> Gray) ==============
+_screen_test_thread = None
+_screen_test_stop = threading.Event()
+_screen_test_lock = threading.Lock()
+
+def start_screen_roi_test():
+    """啟動螢幕 ROI 綠→灰 持續監聽測試（只在觸發時輸出 log）"""
+    import pyautogui
+    global _screen_test_thread
+
+    with _screen_test_lock:
+        if _screen_test_thread and _screen_test_thread.is_alive():
+            log("ℹ️ [TEST] 螢幕 ROI 測試已在執行中")
+            return
+
+        if roi_trigger is None:
+            log("⚠️ [TEST] 尚未設定螢幕 ROI，請先於『ROI 設定』選取螢幕監聽 ROI")
+            return
+
+        # 嘗試載入 pyautogui
+        try:
+            _ = pyautogui.size()
+        except Exception as e:
+            log(f"❌ [TEST] 需要 pyautogui 以擷取螢幕：{e}")
+            return
+
+        _screen_test_stop.clear()
+
+        def _esc_local_listener():
+            """本測試專用 ESC 監聽（只停止測試，不影響主程序）"""
+            try:
+                from pynput import keyboard
+                def on_press(key):
+                    if key == keyboard.Key.esc:
+                        log("🛑 [TEST] 按下 ESC，停止螢幕 ROI 測試")
+                        stop_screen_roi_test()
+                        return False
+                with keyboard.Listener(on_press=on_press) as l:
+                    l.join()
+            except Exception:
+                pass
+
+        def _loop():
+            log("🧪 [TEST] 開始螢幕 ROI 綠→灰 持續監聽（僅在觸發時輸出）")
+            # 啟動測試專用 ESC 監聽
+            threading.Thread(target=_esc_local_listener, daemon=True).start()
+
+            prev = None
+            while not _screen_test_stop.is_set():
+                try:
+                    x, y, w, h = roi_trigger
+                    # 擷取目前 ROI 畫面
+                    im = np.array(pyautogui.screenshot(region=(x, y, w, h)))
+                    curr = cv2.cvtColor(im, cv2.COLOR_RGB2BGR)
+
+                    # 與上一張比較
+                    if prev is not None:
+                        triggered, dG, dGray = detect_green_to_gray(
+                            prev, curr, g_drop_threshold, gray_increase_threshold
+                        )
+                        if triggered:
+                            log(f"🟢 [TEST] 綠→灰觸發 ΔG={dG:.2f}, ΔGray={dGray:.2f}")
+
+                    prev = curr
+
+                except Exception as e:
+                    log(f"⚠️ [TEST] 螢幕 ROI 擷取/判斷失敗：{e}")
+                    time.sleep(0.5)
+
+                # 與正式監聽同節奏
+                time.sleep(trigger_update_interval)
+
+            log("🟥 [TEST] 螢幕 ROI 測試已停止")
+
+        _screen_test_thread = threading.Thread(target=_loop, daemon=True, name="screen_roi_test")
+        _screen_test_thread.start()
+def stop_screen_roi_test():
+    """停止螢幕 ROI 測試"""
+    _screen_test_stop.set()
+
 # ============== Main App ==============
 def main():
     global root, left_preview, right_preview, powder_bed_roi_preview, trigger_roi_preview
@@ -1226,6 +1307,8 @@ def main():
 
     # === Menu ===
     menubar = tk.Menu(root)
+
+    # === Macro Menu ===
     macro_menu = tk.Menu(menubar, tearoff=0)
     macro_menu.add_command(label="錄製巨集", command=record_main_macro)
     macro_menu.add_command(label="播放巨集（單次）", command=play_main_macro_once)
@@ -1235,6 +1318,7 @@ def main():
     macro_menu.add_command(label="設定播放間隔", command=set_macro_delay)
     menubar.add_cascade(label="巨集", menu=macro_menu)
 
+    # === ROI Menu ===
     roi_menu = tk.Menu(menubar, tearoff=0)
     roi_menu.add_command(label="選取粉床 ROI (Main)", command=lambda: select_roi("main"))
     roi_menu.add_command(label="選取螢幕監聽 ROI", command=select_screen_roi)
@@ -1253,6 +1337,12 @@ def main():
     debug_menu.add_command(label="🔴 手動觸發 Predict BAD", command=manual_trigger_bad)
     debug_menu.add_command(label="🟠 手動觸發 OXY 高於閾值", command=manual_trigger_high_oxy)
     menubar.add_cascade(label="Debug 工具", menu=debug_menu)
+
+    # === Test Menu ===
+    test_menu = tk.Menu(menubar, tearoff=0)
+    test_menu.add_command(label="開始螢幕 ROI 綠→灰 測試", command=start_screen_roi_test)
+    test_menu.add_command(label="停止測試", command=stop_screen_roi_test)
+    menubar.add_cascade(label="測試工具", menu=test_menu)
 
     # === Status bar ===
     status_frame = tk.Frame(root, bg="#202020")
